@@ -2964,6 +2964,14 @@ class PaymentVerificationView(discord.ui.View):
         self.receiver_address = receiver_address
         self.amount_usd = amount_usd
         self.months = months
+        
+        # Link button to dancryptic's direct Discord profile/DM for support
+        self.add_item(discord.ui.Button(
+            label="Support",
+            style=discord.ButtonStyle.link,
+            url="https://discord.com/users/1248988195006447688",
+            emoji="💬"
+        ))
 
     @discord.ui.button(label="I Paid", style=discord.ButtonStyle.primary, emoji="✅")
     async def btn_i_paid(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3026,7 +3034,7 @@ class UpgradeView(discord.ui.View):
         self.receiver_address = receiver_address
         
         if show_monthly:
-            btn_monthly = discord.ui.Button(label="Pay Monthly ($1)", style=discord.ButtonStyle.success, emoji="💰")
+            btn_monthly = discord.ui.Button(label="Pay Monthly ($49)", style=discord.ButtonStyle.success, emoji="💰")
             btn_monthly.callback = self.btn_pay_monthly
             self.add_item(btn_monthly)
             
@@ -3034,8 +3042,16 @@ class UpgradeView(discord.ui.View):
         btn_yearly.callback = self.btn_pay_yearly
         self.add_item(btn_yearly)
 
+        # Support button next to payment buttons
+        self.add_item(discord.ui.Button(
+            label="Support",
+            style=discord.ButtonStyle.link,
+            url="https://discord.com/users/1248988195006447688",
+            emoji="💬"
+        ))
+
     async def btn_pay_monthly(self, interaction: discord.Interaction):
-        await self.generate_payment(interaction, 1.0, 1)
+        await self.generate_payment(interaction, 49.0, 1)
 
     async def btn_pay_yearly(self, interaction: discord.Interaction):
         await self.generate_payment(interaction, 300.0, 12)
@@ -3116,23 +3132,24 @@ async def upgrade_prefix(ctx):
         title="💎 Upgrade to MemecoinBot Premium",
         description=(
             "Supercharge your trading with our next-generation due diligence and tracking tools. "
-            "Get access to high-speed features and lift daily query limits."
+            "Lift all daily query limits and unlock high-speed real-time custom trackers."
         ),
         color=0xFFD700
     )
     embed.add_field(
         name="🚀 Premium Perks",
         value=(
-            "• **Unlimited `/ca` queries**\n"
-            "• **Unlimited `/checkuser` audits**\n"
-            "• **Track up to 50 custom wallets**\n"
-            "• **KOL Tracker & Insider Bundler scans**"
+            "• **Unlimited `/ca` queries** — Run contract address security scans without limits.\n"
+            "• **Unlimited `/checkuser` audits** — Scan Twitter handles and rebranding histories on demand.\n"
+            "• **Track up to 50 custom wallets** — Get real-time alerts inside your private channel thread.\n"
+            "• **KOL Tracker & Insider Bundler scans** — Detect coordinated insider transactions instantly.\n"
+            "• **Multi-Server Access** — Use your premium benefits across all allowed channels & servers."
         ),
         inline=False
     )
     embed.add_field(
-        name="💰 Price",
-        value="**$1 USD** / month OR **$300 USD** / year (50% discount!)",
+        name="💰 Pricing Options",
+        value="**$49 USD** / month OR **$300 USD** / year (Save 50%!)",
         inline=False
     )
     embed.set_footer(text="Click a plan below to proceed with Solana payment.")
@@ -3169,23 +3186,24 @@ async def upgrade_slash(interaction: discord.Interaction):
         title="💎 Upgrade to MemecoinBot Premium",
         description=(
             "Supercharge your trading with our next-generation due diligence and tracking tools. "
-            "Get access to high-speed features and lift daily query limits."
+            "Lift all daily query limits and unlock high-speed real-time custom trackers."
         ),
         color=0xFFD700
     )
     embed.add_field(
         name="🚀 Premium Perks",
         value=(
-            "• **Unlimited `/ca` queries**\n"
-            "• **Unlimited `/checkuser` audits**\n"
-            "• **Track up to 50 custom wallets**\n"
-            "• **KOL Tracker & Insider Bundler scans**"
+            "• **Unlimited `/ca` queries** — Run contract address security scans without limits.\n"
+            "• **Unlimited `/checkuser` audits** — Scan Twitter handles and rebranding histories on demand.\n"
+            "• **Track up to 50 custom wallets** — Get real-time alerts inside your private channel thread.\n"
+            "• **KOL Tracker & Insider Bundler scans** — Detect coordinated insider transactions instantly.\n"
+            "• **Multi-Server Access** — Use your premium benefits across all allowed channels & servers."
         ),
         inline=False
     )
     embed.add_field(
-        name="💰 Price",
-        value="**$1 USD** / month OR **$300 USD** / year (50% discount!)",
+        name="💰 Pricing Options",
+        value="**$49 USD** / month OR **$300 USD** / year (Save 50%!)",
         inline=False
     )
     embed.set_footer(text="Click a plan below to proceed with Solana payment.")
