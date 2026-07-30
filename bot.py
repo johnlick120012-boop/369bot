@@ -3416,42 +3416,77 @@ def rebuild_all_tracked_wallets():
     # 2. Load User custom wallets
     user_data = load_user_wallets_data()
     for uid, uinfo in user_data.items():
-        thread_id = uinfo.get("thread_id")
+        thread_ids = uinfo.get("thread_ids", {})
+        # If thread_ids dict doesn't exist but legacy thread_id does
+        if not thread_ids and uinfo.get("thread_id"):
+            thread_ids = {"legacy": uinfo.get("thread_id")}
+
         wallets = uinfo.get("wallets", [])
         for w in wallets:
             addr = w.get("address")
             if addr and w.get("alertsOn", True):
                 if addr not in new_map:
                     new_map[addr] = []
-                new_map[addr].append({
-                    "type": "user",
-                    "user_id": uid,
-                    "thread_id": thread_id,
-                    "name": w.get("name") or "Custom Wallet",
-                    "emoji": w.get("emoji") or "👤"
-                })
+                
+                # Append a target for each server thread
+                for guild_id_str, thread_id in thread_ids.items():
+                    if thread_id:
+                        new_map[addr].append({
+                            "type": "user",
+                            "user_id": uid,
+                            "thread_id": thread_id,
+                            "name": w.get("name") or "Custom Wallet",
+                            "emoji": w.get("emoji") or "👤"
+                        })
                 
     ALL_TRACKED_WALLETS = new_map
     return ALL_TRACKED_WALLETS
 
 async def get_or_create_user_thread(guild: Optional[discord.Guild], user: discord.User, user_data: dict) -> Optional[int]:
-    thread_id = user_data.get("thread_id")
-    if thread_id:
+    if not guild:
+        return None
+        
+    guild_id_str = str(guild.id)
+    thread_ids = user_data.setdefault("thread_ids", {})
+    
+    # Check if we already have a thread for this specific guild
+    t_id = thread_ids.get(guild_id_str)
+    if t_id:
         try:
-            thread = bot.get_channel(int(thread_id)) or await bot.fetch_channel(int(thread_id))
+            thread = bot.get_channel(int(t_id)) or await bot.fetch_channel(int(t_id))
             if thread:
                 return thread.id
         except Exception:
             pass
             
-    parent_channel = None
-    target_channel_id = CUSTOM_TRACKER_CHANNEL_ID or KOL_TRACKER_CHANNEL_ID
-    if target_channel_id:
+    # Legacy fallback: check the old single thread_id field
+    legacy_id = user_data.get("thread_id")
+    if legacy_id:
         try:
-            parent_channel = bot.get_channel(int(target_channel_id)) or await bot.fetch_channel(int(target_channel_id))
+            thread = bot.get_channel(int(legacy_id)) or await bot.fetch_channel(int(legacy_id))
+            if thread and thread.guild:
+                # Save it under its appropriate guild ID
+                thread_ids[str(thread.guild.id)] = thread.id
+                if str(thread.guild.id) == guild_id_str:
+                    return thread.id
         except Exception:
             pass
-            
+
+    parent_channel = None
+    target_channel_id = CUSTOM_TRACKER_CHANNEL_ID or KOL_TRACKER_CHANNEL_ID
+    
+    # If CUSTOM_TRACKER_CHANNEL_ID is a comma-separated list, find the one belonging to this guild
+    if target_channel_id:
+        allowed_ids = [cid.strip() for cid in str(target_channel_id).split(",") if cid.strip()]
+        for cid in allowed_ids:
+            try:
+                ch = bot.get_channel(int(cid)) or await bot.fetch_channel(int(cid))
+                if ch and ch.guild and ch.guild.id == guild.id:
+                    parent_channel = ch
+                    break
+            except Exception:
+                pass
+                
     if not parent_channel and guild:
         for ch in guild.text_channels:
             if ch.name.lower() in ["kol-tracker", "custom-trackers", "wallet-alerts", "general"]:
@@ -3479,10 +3514,11 @@ async def get_or_create_user_thread(guild: Optional[discord.Guild], user: discor
             )
             
         await thread.add_user(user)
-        user_data["thread_id"] = thread.id
+        thread_ids[guild_id_str] = thread.id
+        user_data["thread_id"] = thread.id  # backward compatibility fallback
         return thread.id
     except Exception as e:
-        logger.error(f"Error creating private thread for user {user.id}: {e}")
+        logger.error(f"Error creating private thread for user {user.id} in guild {guild.id}: {e}")
         return None
 
 async def send_user_alert_message(thread_id: int, message_text: str, embed: Optional[discord.Embed] = None, view: Optional[discord.ui.View] = None):
