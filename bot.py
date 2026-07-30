@@ -9,6 +9,7 @@ import json
 import asyncio
 import aiohttp
 import websockets
+from telethon import TelegramClient, events
 
 from config import logger, DISCORD_TOKEN, COMMAND_PREFIX, get_chain_config, DEFAULT_COLOR
 import api_client
@@ -1952,6 +1953,81 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     logger.error(f"App command error: {error}")
 
 
+async def start_telegram_mirror():
+    """Background task running Telethon to mirror target Telegram channel/group messages to Discord."""
+    api_id_str = os.getenv("TELEGRAM_API_ID")
+    api_hash = os.getenv("TELEGRAM_API_HASH")
+    phone = os.getenv("TELEGRAM_PHONE")
+    discord_channel_id = os.getenv("TELEGRAM_MIRROR_CHANNEL_ID")
+    source_chat = os.getenv("TELEGRAM_MIRROR_SOURCE_CHAT", "ctotrackersol")
+
+    if not api_id_str or not api_hash or not discord_channel_id:
+        logger.warning("Telegram Mirror: Missing credentials (TELEGRAM_API_ID/TELEGRAM_API_HASH) or TELEGRAM_MIRROR_CHANNEL_ID in .env. Skipping startup.")
+        return
+
+    try:
+        api_id = int(api_id_str)
+    except ValueError:
+        logger.error(f"Telegram Mirror: TELEGRAM_API_ID must be an integer, got: {api_id_str}")
+        return
+
+    logger.info("Initializing Telegram Mirror background client...")
+    # Using 'groq_userbot_session' to reuse active local session credentials automatically
+    client = TelegramClient('groq_userbot_session', api_id, api_hash)
+
+    @client.on(events.NewMessage(incoming=True))
+    async def mirror_handler(event):
+        try:
+            chat = await event.get_chat()
+            if not chat:
+                return
+
+            chat_id = event.chat_id
+            chat_username = getattr(chat, 'username', None)
+
+            is_target = False
+            if chat_username and chat_username.lower() == source_chat.lower():
+                is_target = True
+            elif str(chat_id) in ("-1002242176791", "2242176791", "-2242176791"):
+                is_target = True
+
+            if not is_target:
+                return
+
+            text = event.message.message or ""
+            if not text:
+                return
+
+            sender_name = "KOL"
+            try:
+                sender = await event.get_sender()
+                if sender:
+                    sender_name = getattr(sender, 'first_name', '') or getattr(sender, 'username', '') or "Member"
+            except Exception:
+                pass
+
+            # Dispatch to configured Discord channel
+            channel = bot.get_channel(int(discord_channel_id)) or await bot.fetch_channel(int(discord_channel_id))
+            if channel:
+                discord_content = f"**[Telegram - {source_chat}]** {sender_name}: {text}"
+                if len(discord_content) > 2000:
+                    discord_content = discord_content[:1990] + "..."
+                await channel.send(discord_content)
+                logger.info(f"Telegram Mirror: Mirrored message from {sender_name} to Discord channel {discord_channel_id}.")
+        except Exception as handler_err:
+            logger.error(f"Error in Telegram mirror event handler: {handler_err}")
+
+    try:
+        if phone:
+            await client.start(phone=phone)
+        else:
+            await client.start()
+        logger.info("Telegram Mirror: Connected and listening to Telegram updates.")
+        await client.run_until_disconnected()
+    except Exception as start_err:
+        logger.error(f"Failed to run Telegram Mirror client: {start_err}")
+
+
 @bot.event
 async def on_ready():
     logger.info(f"Bot connected as {bot.user.name} (ID: {bot.user.id})")
@@ -1970,6 +2046,11 @@ async def on_ready():
     if not hasattr(bot, "kol_tracker_started"):
         bot.kol_tracker_started = True
         bot.loop.create_task(start_kol_tracker())
+
+    # Start Telegram Mirror background task if not already running
+    if not hasattr(bot, "telegram_mirror_started"):
+        bot.telegram_mirror_started = True
+        bot.loop.create_task(start_telegram_mirror())
 
 
 @bot.command(name="sync")
