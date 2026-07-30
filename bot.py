@@ -222,9 +222,9 @@ def get_distribution_stats(rug_report: Optional[Dict[str, Any]]) -> Dict[str, An
 
 # ----------------- EMBED GENERATORS -----------------
 
-# ----------------- SECURITY & RUG CHECKER -----------------
+# ----------------- SECURITY -----------------
 
-def analyze_security(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def analyze_security(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]], gmgn_security: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Evaluates security flags, developer centralization, and trading activity metrics."""
     chain_id = pair.get("chainId", "")
     base_token = pair.get("baseToken", {})
@@ -268,7 +268,7 @@ def analyze_security(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]])
         
     if mcap_val > 150000 and total_tx < 15:
         danger_flags.append("\U0001f6a8 **Fake Market Cap**: High MC with almost zero trading activity.")
-
+        
     # Estimated 24h Fees Paid check (volume * ~1% pool fee)
     est_fees_24h = vol_val * 0.01
     if mcap_val > 50000 and est_fees_24h < 50:
@@ -284,7 +284,7 @@ def analyze_security(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]])
     if change_5m > 50.0:
         warnings.append(f"\U0001f680 **Big Candle Pump**: +{change_5m:.1f}% in last 5m. Watch for sniper/bundle dumps!")
         
-    # 2. Solana specific (RugCheck API analysis)
+    # 2. Solana specific (RugCheck / GMGN API analysis)
     score = 0
     dev_holdings = 0.0
     top_10_pct = 0.0
@@ -295,114 +295,160 @@ def analyze_security(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]])
     freeze_status = "Unknown"
     lp_status = "Unknown"
     
-    if chain_id == "solana" and rug_report:
-        score = rug_report.get("score", 0)
-        creator = rug_report.get("creator", "")
-        
-        # Dev / Creator Holdings
-        top_holders = rug_report.get("topHolders", [])
-        known_accounts = rug_report.get("knownAccounts", {})
-        if not isinstance(known_accounts, dict):
-            known_accounts = {}
-        
-        for holder in top_holders:
-            owner = holder.get("owner", "")
-            if owner == creator or holder.get("address") == creator:
-                dev_holdings += holder.get("pct", 0.0)
+    if chain_id == "solana":
+        # 2a. Check GMGN Security if available
+        if gmgn_security:
+            if gmgn_security.get("is_honeypot") is True or gmgn_security.get("is_honeypot") == 1:
+                danger_flags.append("🚨 **Honeypot Danger**: GMGN detects that token sells are disabled / honeypot!")
                 
-        if dev_holdings > 20.0:
-            danger_flags.append(f"🚨 **Dev Centralization**: Creator holds {dev_holdings:.1f}% of supply (Potential Rug!).")
-        elif dev_holdings > 5.0:
-            warnings.append(f"⚠️ **Dev Holdings**: Creator holds {dev_holdings:.1f}% of supply.")
-            
-        # Top Holders / Multi-wallet / Concentration
-        non_pool_holders = []
-        for holder in top_holders:
-            owner = holder.get("owner", "")
-            is_known = False
-            if owner in known_accounts:
-                acc_info = known_accounts[owner]
-                tag = acc_info.get("type", "").lower() if isinstance(acc_info, dict) else ""
-                name = acc_info.get("name", "").lower() if isinstance(acc_info, dict) else ""
-                if "dex" in tag or "pool" in tag or "liquidity" in tag or "amm" in tag:
-                    is_known = True
-            if not is_known:
-                non_pool_holders.append(holder)
+            if gmgn_security.get("cannot_mint") is True or gmgn_security.get("cannot_mint") == 1:
+                mint_status = "✅ Revoked"
+            elif gmgn_security.get("cannot_mint") is False or gmgn_security.get("cannot_mint") == 0:
+                mint_status = "🚨 Active (Dev can mint)"
+                danger_flags.append("🚨 **Mint Authority Enabled**: Developer can print new tokens (detected by GMGN)!")
                 
-        # Check single non-pool holder concentration
-        for holder in non_pool_holders[:10]:
-            pct = holder.get("pct", 0.0)
-            if pct > 10.0:
-                danger_flags.append(f"🚨 **Whale/Insider Danger**: Wallet `{holder.get('owner')[:6]}...` holds {pct:.1f}% of supply!")
-            elif pct > 5.0:
-                danger_flags.append(f"🚨 **High Risk Holder**: Wallet `{holder.get('owner')[:6]}...` holds {pct:.1f}% of supply.")
-            elif pct > 3.0:
-                warnings.append(f"⚠️ **Medium Risk Holder**: Wallet `{holder.get('owner')[:6]}...` holds {pct:.1f}% of supply.")
+            if gmgn_security.get("cannot_freeze") is True or gmgn_security.get("cannot_freeze") == 1:
+                freeze_status = "✅ Revoked"
+            elif gmgn_security.get("cannot_freeze") is False or gmgn_security.get("cannot_freeze") == 0:
+                freeze_status = "🚨 Active (Dev can freeze)"
+                danger_flags.append("🚨 **Freeze Authority Enabled**: Developer can freeze your tokens (detected by GMGN)!")
                 
-        # Total top 10 non-pool concentration
-        top_10_pct = sum(h.get("pct", 0.0) for h in non_pool_holders[:10])
-        if top_10_pct > 50.0:
-            danger_flags.append(f"🚨 **Extreme Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply (Very high dump risk!).")
-        elif top_10_pct > 21.0:
-            warnings.append(f"⚠️ **High Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply (Potential insider/sniper accumulation).")
-        elif top_10_pct > 12.0:
-            warnings.append(f"⚠️ **Medium Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply.")
+            burn_ratio_str = gmgn_security.get("burn_ratio") or "0"
+            try:
+                burn_pct = float(burn_ratio_str) * 100.0
+                if burn_pct >= 95.0:
+                    lp_status = f"✅ Burnt/Locked ({burn_pct:.1f}%)"
+                elif burn_pct > 0.0:
+                    lp_status = f"⚠️ Partially Locked ({burn_pct:.1f}%)"
+                    warnings.append(f"⚠️ **Liquidity Pool Only Partially Locked**: {100 - burn_pct:.1f}% remains unlocked (detected by GMGN)!")
+                else:
+                    if pair.get("dexId") == "pumpfun":
+                        lp_status = "💊 pump.fun Bonding Curve"
+                    else:
+                        lp_status = "🚨 Unlocked (0% Burnt/Locked)"
+                        danger_flags.append("🚨 **Liquidity Unlocked**: Creator can pull the liquidity pool at any time!")
+            except Exception:
+                pass
+
+            top_10_rate = gmgn_security.get("top_10_holder_rate")
+            if top_10_rate and not rug_report:
+                try:
+                    top_10_pct = float(top_10_rate) * 100.0
+                    if top_10_pct > 50.0:
+                        danger_flags.append(f"🚨 **Extreme Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply.")
+                    elif top_10_pct > 21.0:
+                        warnings.append(f"⚠️ **High Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply.")
+                except ValueError:
+                    pass
+
+        # 2b. Check RugCheck if available
+        if rug_report:
+            score = rug_report.get("score", 0)
+            creator = rug_report.get("creator", "")
             
-        # Connected Insider Wallets Checking
-        insider_wallets = [h for h in top_holders if h.get("insider") is True]
-        insider_pct = sum(h.get("pct", 0.0) for h in insider_wallets)
-        if insider_wallets:
-            warnings.append(f"⚠️ **Connected Insider Wallets**: {len(insider_wallets)} wallets with transactional links to deployer control {insider_pct:.1f}% of supply.")
+            top_holders = rug_report.get("topHolders", [])
+            known_accounts = rug_report.get("knownAccounts", {})
+            if not isinstance(known_accounts, dict):
+                known_accounts = {}
             
-        # RugCheck risks list mapping
-        for risk in rug_report.get("risks", []):
-            name = risk.get("name", "")
-            level = risk.get("level", "")
-            val = risk.get("value", "")
-            val_str = f" ({val})" if val else ""
-            
-            if level == "danger":
-                danger_flags.append(f"🚨 **{name}**{val_str}")
-            elif level == "warn":
-                warnings.append(f"⚠️ **{name}**{val_str}")
+            for holder in top_holders:
+                owner = holder.get("owner", "")
+                if owner == creator or holder.get("address") == creator:
+                    dev_holdings += holder.get("pct", 0.0)
+                    
+            if dev_holdings > 20.0:
+                if not any("Dev Centralization" in f for f in danger_flags):
+                    danger_flags.append(f"🚨 **Dev Centralization**: Creator holds {dev_holdings:.1f}% of supply (Potential Rug!).")
+            elif dev_holdings > 5.0:
+                if not any("Dev Holdings" in f for f in warnings):
+                    warnings.append(f"⚠️ **Dev Holdings**: Creator holds {dev_holdings:.1f}% of supply.")
                 
-        # Mint authority status
-        mint_auth = rug_report.get("mintAuthority")
-        if mint_auth is None:
-            mint_status = "✅ Revoked"
-        else:
-            mint_status = "🚨 Active (Dev can mint)"
-            danger_flags.append("🚨 **Mint Authority Enabled**: Developer can print new tokens!")
-            
-        # Freeze authority status
-        freeze_auth = rug_report.get("freezeAuthority")
-        if freeze_auth is None:
-            freeze_status = "✅ Revoked"
-        else:
-            freeze_status = "🚨 Active (Dev can freeze)"
-            danger_flags.append("🚨 **Freeze Authority Enabled**: Developer can freeze your tokens!")
-            
-        # Liquidity Burnt / Locked
-        lp_locked_pct = 0.0
-        markets = rug_report.get("markets", [])
-        if markets:
-            primary_market = markets[0]
-            lp_info = primary_market.get("lp", {})
-            if lp_info:
-                lp_locked_pct = lp_info.get("lpLockedPct", 0.0)
+            non_pool_holders = []
+            for holder in top_holders:
+                owner = holder.get("owner", "")
+                is_known = False
+                if owner in known_accounts:
+                    acc_info = known_accounts[owner]
+                    tag = acc_info.get("type", "").lower() if isinstance(acc_info, dict) else ""
+                    if "dex" in tag or "pool" in tag or "liquidity" in tag or "amm" in tag:
+                        is_known = True
+                if not is_known:
+                    non_pool_holders.append(holder)
+                    
+            for holder in non_pool_holders[:10]:
+                pct = holder.get("pct", 0.0)
+                if pct > 10.0:
+                    danger_flags.append(f"🚨 **Whale/Insider Danger**: Wallet `{holder.get('owner')[:6]}...` holds {pct:.1f}% of supply!")
+                elif pct > 5.0:
+                    danger_flags.append(f"🚨 **High Risk Holder**: Wallet `{holder.get('owner')[:6]}...` holds {pct:.1f}% of supply.")
+                elif pct > 3.0:
+                    warnings.append(f"⚠️ **Medium Risk Holder**: Wallet `{holder.get('owner')[:6]}...` holds {pct:.1f}% of supply.")
+                    
+            top_10_pct = sum(h.get("pct", 0.0) for h in non_pool_holders[:10])
+            if top_10_pct > 50.0:
+                if not any("Extreme Concentration" in f for f in danger_flags):
+                    danger_flags.append(f"🚨 **Extreme Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply (Very high dump risk!).")
+            elif top_10_pct > 21.0:
+                if not any("High Concentration" in f for f in warnings):
+                    warnings.append(f"⚠️ **High Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply (Potential insider/sniper accumulation).")
+            elif top_10_pct > 12.0:
+                if not any("Medium Concentration" in f for f in warnings):
+                    warnings.append(f"⚠️ **Medium Concentration**: Top 10 wallets control {top_10_pct:.1f}% of supply.")
                 
-        if lp_locked_pct >= 95.0:
-            lp_status = f"✅ Burnt/Locked ({lp_locked_pct:.1f}%)"
-        elif lp_locked_pct > 0.0:
-            lp_status = f"⚠️ Partially Locked ({lp_locked_pct:.1f}%)"
-            warnings.append(f"⚠️ **Liquidity Pool Only Partially Locked**: {100 - lp_locked_pct:.1f}% remains unlocked!")
-        else:
-            lp_status = "🚨 Unlocked (0% Burnt/Locked)"
-            # Only flag unlocked if this is a standard pool (not pumpfun curve)
-            if pair.get("dexId") != "pumpfun":
-                danger_flags.append("🚨 **Liquidity Unlocked**: Creator can pull the liquidity pool at any time!")
-            else:
-                lp_status = "💊 pump.fun Bonding Curve"
+            insider_wallets = [h for h in top_holders if h.get("insider") is True]
+            insider_pct = sum(h.get("pct", 0.0) for h in insider_wallets)
+            if insider_wallets:
+                warnings.append(f"⚠️ **Connected Insider Wallets**: {len(insider_wallets)} wallets with transactional links to deployer control {insider_pct:.1f}% of supply.")
+                
+            for risk in rug_report.get("risks", []):
+                name = risk.get("name", "")
+                level = risk.get("level", "")
+                val = risk.get("value", "")
+                val_str = f" ({val})" if val else ""
+                
+                if level == "danger":
+                    if not any(name in f for f in danger_flags):
+                        danger_flags.append(f"🚨 **{name}**{val_str}")
+                elif level == "warn":
+                    if not any(name in f for f in warnings):
+                        warnings.append(f"⚠️ **{name}**{val_str}")
+                    
+            if mint_status == "Unknown":
+                mint_auth = rug_report.get("mintAuthority")
+                if mint_auth is None:
+                    mint_status = "✅ Revoked"
+                else:
+                    mint_status = "🚨 Active (Dev can mint)"
+                    danger_flags.append("🚨 **Mint Authority Enabled**: Developer can print new tokens!")
+                
+            if freeze_status == "Unknown":
+                freeze_auth = rug_report.get("freezeAuthority")
+                if freeze_auth is None:
+                    freeze_status = "✅ Revoked"
+                else:
+                    freeze_status = "🚨 Active (Dev can freeze)"
+                    danger_flags.append("🚨 **Freeze Authority Enabled**: Developer can freeze your tokens!")
+                
+            if lp_status == "Unknown":
+                lp_locked_pct = 0.0
+                markets = rug_report.get("markets", [])
+                if markets:
+                    primary_market = markets[0]
+                    lp_info = primary_market.get("lp", {})
+                    if lp_info:
+                        lp_locked_pct = lp_info.get("lpLockedPct", 0.0)
+                        
+                if lp_locked_pct >= 95.0:
+                    lp_status = f"✅ Burnt/Locked ({lp_locked_pct:.1f}%)"
+                elif lp_locked_pct > 0.0:
+                    lp_status = f"⚠️ Partially Locked ({lp_locked_pct:.1f}%)"
+                    warnings.append(f"⚠️ **Liquidity Pool Only Partially Locked**: {100 - lp_locked_pct:.1f}% remains unlocked!")
+                else:
+                    if pair.get("dexId") != "pumpfun":
+                        lp_status = "🚨 Unlocked (0% Burnt/Locked)"
+                        danger_flags.append("🚨 **Liquidity Unlocked**: Creator can pull the liquidity pool at any time!")
+                    else:
+                        lp_status = "💊 pump.fun Bonding Curve"
             
     # Build structured stats header
     stats_lines = []
@@ -530,13 +576,6 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
         except Exception as e:
             logger.error(f"Error fetching rug report for embed: {e}")
             
-    # Run security evaluation
-    sec = analyze_security(pair, rug_report)
-    
-    # Use security color if it has warnings/dangers, otherwise use default chain color
-    chain_cfg = get_chain_config(chain_id)
-    embed_color = sec["color"] if sec["status"] != "🟢 LOW RISK" else chain_cfg["color"]
-    
     ticker = base_token.get('symbol', 'Unknown').upper()
 
     # --- Token age (from DexScreener pairCreatedAt ms timestamp) ---
@@ -549,9 +588,127 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
         except Exception:
             pass
 
-    # --- Distribution stats from RugCheck ---
-    dist = get_distribution_stats(rug_report) if chain_id == "solana" else {}
+    # --- Pump.fun coin data & dev info fetched in parallel for speed ---
+    pump_coin_data: Optional[Dict[str, Any]] = None
+    dev_info: Dict[str, Any] = {"total_coins": 0, "migrated_coins": 0, "twitter": None}
+    dev_sol_balance: float = 0.0
+    creator_address: str = ""
+    dex_paid_info: Dict[str, Any] = {"has_paid": False, "order_types": [], "boost_active": 0}
+    fresh_wallets_info: Dict[str, Any] = {"fresh_count": 0, "total_sampled": 0, "fresh_pct": 0.0}
     
+    # GMGN specifics
+    gmgn_security: Optional[Dict[str, Any]] = None
+    gmgn_info: Optional[Dict[str, Any]] = None
+    gmgn_holders: Optional[List[Dict[str, Any]]] = None
+    
+    # Check boosts from pair data (available for all chains)
+    _boosts = pair.get("boosts", {})
+    if _boosts and isinstance(_boosts, dict):
+        dex_paid_info["boost_active"] = _boosts.get("active", 0)
+    
+    if chain_id == "solana":
+        if rug_report:
+            creator_address = rug_report.get("creator", "") or ""
+        
+        async def _fetch_pump_coin():
+            try:
+                _h = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                async with aiohttp.ClientSession() as _s:
+                    async with _s.get(f"https://frontend-api-v3.pump.fun/coins/{ca_address}", headers=_h, timeout=aiohttp.ClientTimeout(total=5)) as _r:
+                        if _r.status == 200:
+                            return await _r.json()
+            except Exception as _e:
+                logger.error(f"pump.fun fetch error in embed: {_e}")
+            return None
+        
+        async def _fetch_dev_info():
+            if creator_address:
+                return await api_client.get_dev_info(creator_address)
+            return {"total_coins": 0, "migrated_coins": 0, "twitter": None}
+        
+        async def _fetch_dev_balance():
+            if creator_address:
+                http_url, _ = get_solana_rpc_urls()
+                return await api_client.get_sol_balance(creator_address, http_url)
+            return 0.0
+        
+        async def _fetch_dex_paid():
+            return await api_client.get_dex_paid_orders(chain_id, ca_address)
+        
+        async def _fetch_fresh_wallets():
+            http_url, _ = get_solana_rpc_urls()
+            return await api_client.get_fresh_wallets_count(ca_address, http_url)
+            
+        async def _fetch_gmgn_security():
+            return await api_client.get_gmgn_token_security("solana", ca_address)
+            
+        async def _fetch_gmgn_info():
+            return await api_client.get_gmgn_token_info("solana", ca_address)
+            
+        async def _fetch_gmgn_holders():
+            return await api_client.get_gmgn_token_holders("solana", ca_address, limit=100)
+        
+        _results = await asyncio.gather(
+            _fetch_pump_coin(), _fetch_dev_info(), _fetch_dev_balance(),
+            _fetch_dex_paid(), _fetch_fresh_wallets(),
+            _fetch_gmgn_security(), _fetch_gmgn_info(), _fetch_gmgn_holders(),
+            return_exceptions=True
+        )
+        if not isinstance(_results[0], Exception):
+            pump_coin_data = _results[0]
+        if not isinstance(_results[1], Exception):
+            dev_info = _results[1]
+        if not isinstance(_results[2], Exception):
+            dev_sol_balance = _results[2]
+        if not isinstance(_results[3], Exception) and _results[3]:
+            dex_paid_info.update(_results[3])
+        if not isinstance(_results[4], Exception) and _results[4]:
+            fresh_wallets_info = _results[4]
+        if not isinstance(_results[5], Exception):
+            gmgn_security = _results[5]
+        if not isinstance(_results[6], Exception):
+            gmgn_info = _results[6]
+        if not isinstance(_results[7], Exception) and _results[7]:
+            gmgn_holders = _results[7].get("list") if isinstance(_results[7], dict) else _results[7]
+            
+    else:
+        # For non-Solana chains, still check DEX paid
+        try:
+            dex_paid_info.update(await api_client.get_dex_paid_orders(chain_id, ca_address))
+        except Exception:
+            pass
+            
+    # Run security evaluation after fetching all data
+    sec = analyze_security(pair, rug_report, gmgn_security)
+    
+    # Use security color if it has warnings/dangers, otherwise use default chain color
+    chain_cfg = get_chain_config(chain_id)
+    embed_color = sec["color"] if sec["status"] != "🟢 LOW RISK" else chain_cfg["color"]
+
+    # --- Distribution stats from RugCheck and GMGN ---
+    dist = get_distribution_stats(rug_report) if chain_id == "solana" else {}
+    if chain_id == "solana" and gmgn_info:
+        gmgn_summary = insider_analyzer.summarize_gmgn(gmgn_security, gmgn_info, gmgn_holders)
+        if gmgn_summary["source"]:
+            dist["bundler_pct"] = f"{gmgn_summary['bundler_pct']:.1f}%"
+            dist["sniper_pct"] = f"{gmgn_summary['sniper_pct']:.1f}%"
+            dist["insider_pct"] = gmgn_summary["insider_pct"]
+            
+            # Find wallet counts from clusters
+            for c in gmgn_summary["clusters"]:
+                if c["type"] == "bundler":
+                    dist["bundler_wallets"] = c["wallet_count"]
+                    dist["bundler_clusters"] = 1
+                elif c["type"] == "insider":
+                    dist["insider_count"] = c["wallet_count"]
+                    dist["insider_networks"] = 1
+                    
+            if gmgn_info.get("stat", {}).get("holder_count"):
+                try:
+                    dist["total_holders"] = int(gmgn_info["stat"]["holder_count"])
+                except Exception:
+                    pass
+
     # Fetch active holders count (value >= $1)
     active_holders = 0
     if chain_id == "solana":
@@ -598,84 +755,15 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     vol_m5 = format_large_number(volume.get("m5"))
     vol_h1 = format_large_number(volume.get("h1"))
     vol_h24 = format_large_number(volume.get("h24"))
-
     
-    # --- Pump.fun coin data & dev info fetched in parallel for speed ---
-    pump_coin_data: Optional[Dict[str, Any]] = None
-    dev_info: Dict[str, Any] = {"total_coins": 0, "migrated_coins": 0, "twitter": None}
-    dev_sol_balance: float = 0.0
-    creator_address: str = ""
-    dex_paid_info: Dict[str, Any] = {"has_paid": False, "order_types": [], "boost_active": 0}
-    fresh_wallets_info: Dict[str, Any] = {"fresh_count": 0, "total_sampled": 0, "fresh_pct": 0.0}
-    
-    # Check boosts from pair data (available for all chains)
-    _boosts = pair.get("boosts", {})
-    if _boosts and isinstance(_boosts, dict):
-        dex_paid_info["boost_active"] = _boosts.get("active", 0)
-    
-    if chain_id == "solana":
-        if rug_report:
-            creator_address = rug_report.get("creator", "") or ""
-        
-        async def _fetch_pump_coin():
-            try:
-                _h = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-                async with aiohttp.ClientSession() as _s:
-                    async with _s.get(f"https://frontend-api-v3.pump.fun/coins/{ca_address}", headers=_h, timeout=aiohttp.ClientTimeout(total=5)) as _r:
-                        if _r.status == 200:
-                            return await _r.json()
-            except Exception as _e:
-                logger.error(f"pump.fun fetch error in embed: {_e}")
-            return None
-        
-        async def _fetch_dev_info():
-            if creator_address:
-                return await api_client.get_dev_info(creator_address)
-            return {"total_coins": 0, "migrated_coins": 0, "twitter": None}
-        
-        async def _fetch_dev_balance():
-            if creator_address:
-                http_url, _ = get_solana_rpc_urls()
-                return await api_client.get_sol_balance(creator_address, http_url)
-            return 0.0
-        
-        async def _fetch_dex_paid():
-            return await api_client.get_dex_paid_orders(chain_id, ca_address)
-        
-        async def _fetch_fresh_wallets():
-            http_url, _ = get_solana_rpc_urls()
-            return await api_client.get_fresh_wallets_count(ca_address, http_url)
-        
-        _results = await asyncio.gather(
-            _fetch_pump_coin(), _fetch_dev_info(), _fetch_dev_balance(),
-            _fetch_dex_paid(), _fetch_fresh_wallets(),
-            return_exceptions=True
-        )
-        if not isinstance(_results[0], Exception):
-            pump_coin_data = _results[0]
-        if not isinstance(_results[1], Exception):
-            dev_info = _results[1]
-        if not isinstance(_results[2], Exception):
-            dev_sol_balance = _results[2]
-        if not isinstance(_results[3], Exception) and _results[3]:
-            dex_paid_info.update(_results[3])
-        if not isinstance(_results[4], Exception) and _results[4]:
-            fresh_wallets_info = _results[4]
-    else:
-        # For non-Solana chains, still check DEX paid
-        try:
-            dex_paid_info.update(await api_client.get_dex_paid_orders(chain_id, ca_address))
-        except Exception:
-            pass
-        
-        # Fallback: grab twitter from DexScreener socials if not found on pump.fun
-        if not dev_info.get("twitter"):
-            _info = pair.get("info", {})
-            if _info:
-                for _soc in _info.get("socials", []):
-                    if _soc.get("type", "").lower() == "twitter":
-                        dev_info["twitter"] = _soc.get("url")
-                        break
+    # Fallback: grab twitter from DexScreener socials if not found on pump.fun
+    if not dev_info.get("twitter"):
+        _info = pair.get("info", {})
+        if _info:
+            for _soc in _info.get("socials", []):
+                if _soc.get("type", "").lower() == "twitter":
+                    dev_info["twitter"] = _soc.get("url")
+                    break
     
     liquidity = pair.get("liquidity", {})
     if not liquidity or liquidity.get("usd") is None:
@@ -1280,6 +1368,7 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
         return
         
     api_key = os.getenv("SOLANA_TRACKER_API_KEY")
+    gmgn_api_key = os.getenv("GMGN_API_KEY")
     
     # Fetch RugCheck report (always)
     try:
@@ -1297,6 +1386,27 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
             st_holders = await api_client.get_solanatracker_holders(mint, api_key)
         except Exception as e:
             logger.error(f"Error calling Solana Tracker API: {e}")
+
+    # Fetch from GMGN OpenAPI if key is configured
+    gmgn_security = None
+    gmgn_info = None
+    gmgn_holders = None
+    if gmgn_api_key:
+        try:
+            gmgn_res = await asyncio.gather(
+                api_client.get_gmgn_token_security("solana", mint),
+                api_client.get_gmgn_token_info("solana", mint),
+                api_client.get_gmgn_token_holders("solana", mint, limit=100),
+                return_exceptions=True
+            )
+            if not isinstance(gmgn_res[0], Exception):
+                gmgn_security = gmgn_res[0]
+            if not isinstance(gmgn_res[1], Exception):
+                gmgn_info = gmgn_res[1]
+            if not isinstance(gmgn_res[2], Exception) and gmgn_res[2]:
+                gmgn_holders = gmgn_res[2].get("list") if isinstance(gmgn_res[2], dict) else gmgn_res[2]
+        except Exception as e:
+            logger.error(f"Error calling GMGN API in tracked check: {e}")
             
     # Rebuild all tracked wallets
     tracked_wallets = rebuild_all_tracked_wallets()
@@ -1326,6 +1436,14 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
                     "amount": amount_str
                 })
                 
+    # Search GMGN holders
+    if gmgn_holders:
+        for h in gmgn_holders:
+            addr = h.get("address") or h.get("wallet")
+            pct = (h.get("amount_percentage") or 0.0) * 100.0
+            amount_str = f"{h.get('balance', 0):,}"
+            check_address(addr, pct, amount_str)
+
     # Search RugCheck holders
     if rug_report:
         top_holders = rug_report.get("topHolders", []) or []
@@ -1357,6 +1475,9 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
         rug_report=rug_report,
         st_bundlers=st_bundlers,
         st_holders=st_holders,
+        gmgn_security=gmgn_security,
+        gmgn_info=gmgn_info,
+        gmgn_holders=gmgn_holders,
     )
     insider_lines = insider_analyzer.format_report_lines(insider_report)
     cluster_lines = insider_analyzer.format_cluster_lines(insider_report)
@@ -1383,10 +1504,13 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
     embed.add_field(name="🧠 Insider / Sniper / Bundler Distribution", value="\n".join(insider_lines), inline=False)
     embed.add_field(name="📦 Cluster Distribution", value="\n\n".join(cluster_lines)[:1024], inline=False)
     
-    if not api_key:
-        embed.set_footer(text="Using RugCheck + free Solana RPC fallback. Set SOLANA_TRACKER_API_KEY for richer bundler clusters.")
-    else:
-        embed.set_footer(text="Sources: Solana Tracker, RugCheck, Solana RPC • Insider threshold: 10% supply")
+    sources_list = []
+    if gmgn_api_key:
+        sources_list.append("GMGN.ai")
+    if api_key:
+        sources_list.append("Solana Tracker")
+    sources_list.extend(["RugCheck", "Solana RPC"])
+    embed.set_footer(text=f"Sources: {', '.join(sources_list)} • Insider threshold: 10% supply")
         
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1428,9 +1552,53 @@ class UserAlertView(discord.ui.View):
         except Exception:
             return
             
-        rug_report = await api_client.get_rugcheck_report(self.mint)
-        pairs = await api_client.get_token_by_ca(self.mint)
+        gmgn_api_key = os.getenv("GMGN_API_KEY")
         
+        # Parallel fetch for GMGN and Rugcheck / Pairs
+        async def _fetch_rugcheck():
+            try:
+                return await api_client.get_rugcheck_report(self.mint)
+            except Exception:
+                return None
+                
+        async def _fetch_pairs():
+            try:
+                return await api_client.get_token_by_ca(self.mint)
+            except Exception:
+                return None
+                
+        async def _fetch_gmgn_security():
+            if gmgn_api_key:
+                return await api_client.get_gmgn_token_security("solana", self.mint)
+            return None
+            
+        async def _fetch_gmgn_info():
+            if gmgn_api_key:
+                return await api_client.get_gmgn_token_info("solana", self.mint)
+            return None
+            
+        async def _fetch_gmgn_holders():
+            if gmgn_api_key:
+                return await api_client.get_gmgn_token_holders("solana", self.mint, limit=100)
+            return None
+            
+        results = await asyncio.gather(
+            _fetch_rugcheck(),
+            _fetch_pairs(),
+            _fetch_gmgn_security(),
+            _fetch_gmgn_info(),
+            _fetch_gmgn_holders(),
+            return_exceptions=True
+        )
+        
+        rug_report = results[0] if not isinstance(results[0], Exception) else None
+        pairs = results[1] if not isinstance(results[1], Exception) else None
+        gmgn_security = results[2] if not isinstance(results[2], Exception) else None
+        gmgn_info = results[3] if not isinstance(results[3], Exception) else None
+        gmgn_holders = None
+        if not isinstance(results[4], Exception) and results[4]:
+            gmgn_holders = results[4].get("list") if isinstance(results[4], dict) else results[4]
+            
         embed = discord.Embed(
             title=f"🔍 High-Quality Token Analysis: ${self.ticker.upper()}",
             description=f"**Contract Address:** `{self.mint}`",
@@ -1451,21 +1619,19 @@ class UserAlertView(discord.ui.View):
         found_tracked = []
         seen_addresses = set()
         
+        # Search GMGN holders
+        if gmgn_holders:
+            for h in gmgn_holders:
+                addr = h.get("address") or h.get("wallet")
+                if addr and addr not in seen_addresses:
+                    seen_addresses.add(addr)
+                    if addr in tracked_wallets:
+                        for w in tracked_wallets[addr]:
+                            pct = (h.get("amount_percentage") or 0.0) * 100.0
+                            found_tracked.append(f"{w.get('emoji', '👤')} **{w.get('name')}** ({w.get('type').upper()}) holds `{pct:.2f}%` of supply (GMGN)")
+                            
+        # Search RugCheck holders
         if rug_report:
-            score = rug_report.get("score", 0)
-            risks = rug_report.get("risks", [])
-            mint_auth = rug_report.get("token", {}).get("mintAuthority")
-            freeze_auth = rug_report.get("token", {}).get("freezeAuthority")
-            
-            risk_status = "🟢 Low Risk (Good)" if score < 1000 else ("🟡 Medium Risk" if score < 3000 else "🔴 High Risk / Suspicious")
-            embed.add_field(name="🛡️ Security Score", value=f"{risk_status} ({score} pts)", inline=False)
-            
-            mint_str = "❌ Disabled (Safe)" if not mint_auth else f"⚠️ Active (`{mint_auth[:4]}...{mint_auth[-4:]}`)"
-            freeze_str = "❌ Disabled (Safe)" if not freeze_auth else f"⚠️ Active (`{freeze_auth[:4]}...{freeze_auth[-4:]}`)"
-            embed.add_field(name="🔒 Mint Authority", value=mint_str, inline=True)
-            embed.add_field(name="❄️ Freeze Authority", value=freeze_str, inline=True)
-            
-            # Check tracked wallets in RugCheck topHolders
             top_holders = rug_report.get("topHolders", []) or []
             for h in top_holders:
                 owner = h.get("owner")
@@ -1474,30 +1640,57 @@ class UserAlertView(discord.ui.View):
                     if owner in tracked_wallets:
                         for w in tracked_wallets[owner]:
                             pct = h.get("pct", 0.0)
-                            found_tracked.append(f"{w.get('emoji', '👤')} **{w.get('name')}** ({w.get('type').upper()}) holds `{pct:.2f}%` of supply")
-                            
-            http_url, _ = get_solana_rpc_urls()
-            insider_report = await insider_analyzer.build_insider_report(
-                mint=self.mint,
-                rpc_url=http_url,
-                rug_report=rug_report,
-            )
-            embed.add_field(
-                name="🧠 Insider / Sniper / Bundler Distribution",
-                value="\n".join(insider_analyzer.format_report_lines(insider_report)),
-                inline=False
-            )
-            embed.add_field(
-                name="📦 Cluster Distribution",
-                value="\n\n".join(insider_analyzer.format_cluster_lines(insider_report))[:1024],
-                inline=False
-            )
+                            found_tracked.append(f"{w.get('emoji', '👤')} **{w.get('name')}** ({w.get('type').upper()}) holds `{pct:.2f}%` of supply (RugCheck)")
             
-            if risks:
-                risk_list = "\n".join([f"• {r.get('name')}: {r.get('description', '')}" for r in risks[:4]])
-                embed.add_field(name="⚠️ Detected Risk Flags", value=risk_list, inline=False)
-        else:
-            embed.add_field(name="🛡️ Security Analysis", value="✅ Clean token! No mint or freeze authority risks detected.", inline=False)
+        score = rug_report.get("score", 0) if rug_report else 0
+        risks = rug_report.get("risks", []) if rug_report else []
+        mint_auth = rug_report.get("token", {}).get("mintAuthority") if rug_report else None
+        freeze_auth = rug_report.get("token", {}).get("freezeAuthority") if rug_report else None
+        
+        if gmgn_security:
+            if gmgn_security.get("is_honeypot") is True or gmgn_security.get("is_honeypot") == 1:
+                risks.append({"name": "Honeypot Danger", "description": "GMGN detects sells are disabled"})
+            if gmgn_security.get("cannot_mint") is False or gmgn_security.get("cannot_mint") == 0:
+                mint_auth = "Active (GMGN)"
+            if gmgn_security.get("cannot_freeze") is False or gmgn_security.get("cannot_freeze") == 0:
+                freeze_auth = "Active (GMGN)"
+                
+        risk_status = "🟢 Low Risk (Good)" if score < 1000 else ("🟡 Medium Risk" if score < 3000 else "🔴 High Risk / Suspicious")
+        if gmgn_security and (gmgn_security.get("is_honeypot") is True or gmgn_security.get("is_honeypot") == 1):
+            risk_status = "🔴 Honeypot Alert"
+            
+        embed.add_field(name="🛡️ Security Score", value=f"{risk_status} ({score} pts)" if rug_report else risk_status, inline=False)
+        
+        mint_str = "❌ Disabled (Safe)" if not mint_auth else (f"⚠️ Active (`{mint_auth[:4]}...{mint_auth[-4:]}`)" if len(str(mint_auth)) > 10 else f"⚠️ {mint_auth}")
+        freeze_str = "❌ Disabled (Safe)" if not freeze_auth else (f"⚠️ Active (`{freeze_auth[:4]}...{freeze_auth[-4:]}`)" if len(str(freeze_auth)) > 10 else f"⚠️ {freeze_auth}")
+        embed.add_field(name="🔒 Mint Authority", value=mint_str, inline=True)
+        embed.add_field(name="❄️ Freeze Authority", value=freeze_str, inline=True)
+        
+        http_url, _ = get_solana_rpc_urls()
+        insider_report = await insider_analyzer.build_insider_report(
+            mint=self.mint,
+            rpc_url=http_url,
+            rug_report=rug_report,
+            gmgn_security=gmgn_security,
+            gmgn_info=gmgn_info,
+            gmgn_holders=gmgn_holders,
+        )
+        embed.add_field(
+            name="🧠 Insider / Sniper / Bundler Distribution",
+            value="\n".join(insider_analyzer.format_report_lines(insider_report)),
+            inline=False
+        )
+        embed.add_field(
+            name="📦 Cluster Distribution",
+            value="\n\n".join(insider_analyzer.format_cluster_lines(insider_report))[:1024],
+            inline=False
+        )
+        
+        if risks:
+            risk_list = "\n".join([f"• {r.get('name')}: {r.get('description', '')}" for r in risks[:4]])
+            embed.add_field(name="⚠️ Detected Risk Flags", value=risk_list, inline=False)
+        elif not rug_report and not gmgn_security:
+            embed.add_field(name="🛡️ Security Analysis", value="⚠️ Security details unavailable.", inline=False)
             
         # Add Tracked Holders field
         if found_tracked:
@@ -1505,7 +1698,12 @@ class UserAlertView(discord.ui.View):
         else:
             embed.add_field(name="👤 Tracked Holders", value="✅ None of your tracked wallets are holding this token.", inline=False)
             
-        embed.set_footer(text="Powered by Padre & RugCheck • Solana Token Inspector")
+        sources = ["Padre"]
+        if gmgn_api_key:
+            sources.append("GMGN.ai")
+        if rug_report:
+            sources.append("RugCheck")
+        embed.set_footer(text=f"Powered by {', '.join(sources)} • Solana Token Inspector")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Tracked / Bundler Check", style=discord.ButtonStyle.secondary, emoji="🗺️")

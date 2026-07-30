@@ -167,6 +167,91 @@ def summarize_solana_tracker(st_bundlers: Optional[Dict[str, Any]]) -> Dict[str,
     }
 
 
+def summarize_gmgn(
+    gmgn_security: Optional[Dict[str, Any]],
+    gmgn_info: Optional[Dict[str, Any]],
+    gmgn_holders: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    if not gmgn_info:
+        return {
+            "top_10_holder_pct": 0.0,
+            "dev_pct": 0.0,
+            "sniper_pct": 0.0,
+            "bundler_pct": 0.0,
+            "insider_pct": 0.0,
+            "clusters": [],
+            "source": None,
+        }
+
+    stat = gmgn_info.get("stat") or {}
+    dev_data = gmgn_info.get("dev") or {}
+    
+    def get_pct(val):
+        if val is None:
+            return 0.0
+        try:
+            return float(val) * 100.0
+        except Exception:
+            return 0.0
+
+    top_10_holder_pct = get_pct(stat.get("top_10_holder_rate") or dev_data.get("top_10_holder_rate") or (gmgn_security or {}).get("top_10_holder_rate"))
+    dev_pct = get_pct(stat.get("dev_team_hold_rate")) + get_pct(stat.get("creator_hold_rate"))
+    sniper_pct = get_pct(stat.get("top70_sniper_hold_rate"))
+    bundler_pct = get_pct(stat.get("top_bundler_trader_percentage"))
+    insider_pct = get_pct(stat.get("top_rat_trader_percentage")) + dev_pct
+    
+    # Process holders to form clusters
+    clusters_dict = {}
+    holders_list = gmgn_holders or []
+    for h in holders_list:
+        address = h.get("address") or h.get("wallet") or ""
+        if not address:
+            continue
+        pct = (h.get("amount_percentage") or 0.0) * 100.0
+        wallet_tags = h.get("tags") or []
+        
+        group = None
+        if "dev" in wallet_tags:
+            group = "dev"
+        elif "bundler" in wallet_tags:
+            group = "bundler"
+        elif "sniper" in wallet_tags:
+            group = "sniper"
+        elif "rat_trader" in wallet_tags:
+            group = "insider"
+        elif any(t in wallet_tags for t in ["smart_degen", "bluechip_owner", "renowned"]):
+            group = "smart_money"
+            
+        if group:
+            cluster = clusters_dict.setdefault(group, {
+                "id": group,
+                "type": group,
+                "wallet_count": 0,
+                "supply_pct": 0.0,
+                "wallets": [],
+                "source": "GMGN top holders",
+                "red_flag": False
+            })
+            cluster["wallet_count"] += 1
+            cluster["supply_pct"] += pct
+            cluster["wallets"].append(address)
+
+    clusters = list(clusters_dict.values())
+    for cluster in clusters:
+        cluster["wallets"] = cluster["wallets"][:15]
+        cluster["red_flag"] = cluster["supply_pct"] >= RED_FLAG_SUPPLY_PCT
+
+    return {
+        "top_10_holder_pct": top_10_holder_pct,
+        "dev_pct": dev_pct,
+        "sniper_pct": sniper_pct,
+        "bundler_pct": bundler_pct,
+        "insider_pct": insider_pct,
+        "clusters": clusters,
+        "source": "GMGN.ai",
+    }
+
+
 def summarize_holders_from_sources(
     rug_report: Optional[Dict[str, Any]],
     st_holders: Optional[Any],
@@ -214,22 +299,43 @@ async def build_insider_report(
     rug_report: Optional[Dict[str, Any]] = None,
     st_bundlers: Optional[Dict[str, Any]] = None,
     st_holders: Optional[Any] = None,
+    gmgn_security: Optional[Dict[str, Any]] = None,
+    gmgn_info: Optional[Dict[str, Any]] = None,
+    gmgn_holders: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     largest_task = asyncio.create_task(fetch_largest_token_accounts(mint, rpc_url))
     rug = summarize_rugcheck(rug_report)
     st = summarize_solana_tracker(st_bundlers)
+    gmgn = summarize_gmgn(gmgn_security, gmgn_info, gmgn_holders)
     largest_accounts = await largest_task
     holder_summary = summarize_holders_from_sources(rug_report, st_holders, largest_accounts)
 
-    clusters = st["clusters"] or rug["clusters"]
-    bundler_pct = st["bundler_pct"] or rug["bundler_pct"]
-    insider_pct = rug["insider_pct"]
-    sniper_pct = rug["sniper_pct"]
+    if gmgn["source"]:
+        clusters = gmgn["clusters"]
+        bundler_pct = gmgn["bundler_pct"]
+        insider_pct = gmgn["insider_pct"]
+        sniper_pct = gmgn["sniper_pct"]
+        top_10_holder_pct = gmgn["top_10_holder_pct"]
+        primary_source = "GMGN.ai"
+    elif st["source"]:
+        clusters = st["clusters"]
+        bundler_pct = st["bundler_pct"]
+        insider_pct = rug["insider_pct"]
+        sniper_pct = rug["sniper_pct"]
+        top_10_holder_pct = holder_summary["top_10_pct"]
+        primary_source = "Solana Tracker"
+    else:
+        clusters = rug["clusters"]
+        bundler_pct = rug["bundler_pct"]
+        insider_pct = rug["insider_pct"]
+        sniper_pct = rug["sniper_pct"]
+        top_10_holder_pct = holder_summary["top_10_pct"]
+        primary_source = "RugCheck"
 
     risk_level = "LOW"
     if max(insider_pct, bundler_pct, sniper_pct or 0.0) >= RED_FLAG_SUPPLY_PCT:
         risk_level = "HIGH"
-    elif max(insider_pct, bundler_pct, sniper_pct or 0.0, holder_summary["top_10_pct"]) >= 5.0:
+    elif max(insider_pct, bundler_pct, sniper_pct or 0.0, top_10_holder_pct) >= 5.0:
         risk_level = "MEDIUM"
 
     return {
@@ -239,10 +345,12 @@ async def build_insider_report(
         "insider_pct": insider_pct,
         "bundler_pct": bundler_pct,
         "sniper_pct": sniper_pct,
-        "top_10_holder_pct": holder_summary["top_10_pct"],
+        "top_10_holder_pct": top_10_holder_pct,
         "clusters": sorted(clusters, key=lambda c: c.get("supply_pct", 0.0), reverse=True),
         "holder_summary": holder_summary,
+        "primary_source": primary_source,
         "sources": {
+            "gmgn": bool(gmgn_info),
             "rugcheck": bool(rug_report),
             "solana_tracker": bool(st_bundlers or st_holders),
             "rpc_largest_accounts": bool(largest_accounts),

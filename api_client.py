@@ -1001,3 +1001,149 @@ def calculate_risk_score(twitter_data: Optional[dict], domain_data: Optional[dic
             flags.append(f"🚨 FAKE DOMAIN: {f}")
 
     return min(score, 10), flags
+
+
+async def fetch_gmgn_json(url: str, headers: Dict[str, str], max_retries: int = 3) -> Optional[Dict[str, Any]]:
+    """Helper to perform requests to GMGN OpenAPI with rate limit retry logic."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data and data.get("code") == 0:
+                            return data
+                        else:
+                            err_msg = data.get("message") or data.get("error") or "Unknown API error"
+                            logger.warning(f"GMGN API error (code {data.get('code')}): {err_msg}")
+                            # Check if rate limit
+                            if "RATE_LIMIT" in str(err_msg).upper() or data.get("code") == 429:
+                                reset_str = response.headers.get("x-ratelimit-reset") or response.headers.get("X-RateLimit-Reset")
+                                wait_sec = 2
+                                if reset_str:
+                                    try:
+                                        wait_sec = max(1, int(reset_str) - int(time.time()) + 1)
+                                    except ValueError:
+                                        pass
+                                logger.info(f"Rate limited by GMGN, waiting {wait_sec}s before retry (attempt {attempt}/{max_retries})...")
+                                await asyncio.sleep(wait_sec)
+                                continue
+                            return data
+                    elif response.status == 429:
+                        reset_str = response.headers.get("x-ratelimit-reset") or response.headers.get("X-RateLimit-Reset")
+                        wait_sec = 2
+                        if reset_str:
+                            try:
+                                wait_sec = max(1, int(reset_str) - int(time.time()) + 1)
+                            except ValueError:
+                                pass
+                        logger.info(f"Rate limited (status 429) by GMGN, waiting {wait_sec}s before retry (attempt {attempt}/{max_retries})...")
+                        await asyncio.sleep(wait_sec)
+                        continue
+                    else:
+                        logger.error(f"Error fetching GMGN {url}: Status {response.status}")
+                        return None
+        except Exception as e:
+            logger.warning(f"Request exception for GMGN {url}: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(1)
+            else:
+                return None
+    return None
+
+
+async def get_gmgn_token_info(chain: str, address: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches token general info and stats from GMGN OpenAPI.
+    """
+    api_key = os.getenv("GMGN_API_KEY")
+    if not api_key:
+        logger.warning("GMGN_API_KEY not configured in env.")
+        return None
+    
+    gmgn_chain = chain.lower()
+    if gmgn_chain == "solana":
+        gmgn_chain = "sol"
+    elif gmgn_chain in ("ethereum", "eth"):
+        gmgn_chain = "eth"
+    
+    import uuid
+    client_id = str(uuid.uuid4())
+    timestamp = int(time.time())
+    
+    url = f"https://openapi.gmgn.ai/v1/token/info?chain={gmgn_chain}&address={address}&timestamp={timestamp}&client_id={client_id}"
+    headers = {
+        "X-APIKEY": api_key,
+        "User-Agent": "gmgn-cli/1.0.0"
+    }
+    
+    res = await fetch_gmgn_json(url, headers)
+    if res and res.get("code") == 0:
+        return res.get("data")
+    return None
+
+
+async def get_gmgn_token_security(chain: str, address: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches token security details (mint/freeze authority, lock status, honeypot) from GMGN OpenAPI.
+    """
+    api_key = os.getenv("GMGN_API_KEY")
+    if not api_key:
+        logger.warning("GMGN_API_KEY not configured in env.")
+        return None
+    
+    gmgn_chain = chain.lower()
+    if gmgn_chain == "solana":
+        gmgn_chain = "sol"
+    elif gmgn_chain in ("ethereum", "eth"):
+        gmgn_chain = "eth"
+    
+    import uuid
+    client_id = str(uuid.uuid4())
+    timestamp = int(time.time())
+    
+    url = f"https://openapi.gmgn.ai/v1/token/security?chain={gmgn_chain}&address={address}&timestamp={timestamp}&client_id={client_id}"
+    headers = {
+        "X-APIKEY": api_key,
+        "User-Agent": "gmgn-cli/1.0.0"
+    }
+    
+    res = await fetch_gmgn_json(url, headers)
+    if res and res.get("code") == 0:
+        return res.get("data")
+    return None
+
+
+async def get_gmgn_token_holders(chain: str, address: str, limit: int = 100, tag: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Fetches top token holders (with tags and percentages) from GMGN OpenAPI.
+    Optional tag filters: smart_degen, renowned, fresh_wallet, dev, sniper, rat_trader, bundler, transfer_in, dex_bot, bluechip_owner
+    """
+    api_key = os.getenv("GMGN_API_KEY")
+    if not api_key:
+        logger.warning("GMGN_API_KEY not configured in env.")
+        return None
+    
+    gmgn_chain = chain.lower()
+    if gmgn_chain == "solana":
+        gmgn_chain = "sol"
+    elif gmgn_chain in ("ethereum", "eth"):
+        gmgn_chain = "eth"
+    
+    import uuid
+    client_id = str(uuid.uuid4())
+    timestamp = int(time.time())
+    
+    url = f"https://openapi.gmgn.ai/v1/market/token_top_holders?chain={gmgn_chain}&address={address}&limit={limit}&timestamp={timestamp}&client_id={client_id}"
+    if tag:
+        url += f"&tag={tag}"
+        
+    headers = {
+        "X-APIKEY": api_key,
+        "User-Agent": "gmgn-cli/1.0.0"
+    }
+    
+    res = await fetch_gmgn_json(url, headers)
+    if res and res.get("code") == 0:
+        return res.get("data")
+    return None
