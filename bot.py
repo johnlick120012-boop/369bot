@@ -1632,33 +1632,32 @@ class TrendingView(discord.ui.View):
 
 def check_tracker_channel_permission(interaction: discord.Interaction) -> bool:
     """Returns True if the interaction is from an allowed tracker channel.
-    Supports comma-separated channel IDs in CUSTOM_TRACKER_CHANNEL_ID env var.
+    Supports comma-separated channel IDs in CUSTOM_TRACKER_CHANNEL_ID env var (main server).
     Also respects the global ALLOWED_CATEGORY_IDS restriction for new servers.
-    Returns True for all channels if no restriction is configured.
     """
-    # First check the global category/channel gate
-    # (is_channel_allowed is defined later in the file but Python resolves at call-time)
-    try:
-        if not is_channel_allowed(interaction.channel):
-            return False
-    except NameError:
-        pass  # is_channel_allowed not yet defined (shouldn't happen at runtime)
-
     raw = (CUSTOM_TRACKER_CHANNEL_ID or "").strip()
-    if not raw:
-        # No specific tracker channel restriction
-        return True
+    _raw_cat = os.getenv("ALLOWED_CATEGORY_IDS", "").strip()
+    allowed_categories = set(c.strip() for c in _raw_cat.split(",") if c.strip())
 
-    allowed_ids = [cid.strip() for cid in raw.split(",") if cid.strip()]
-    if not allowed_ids:
+    # If no restrictions are configured at all, allow everywhere
+    if not raw and not allowed_categories:
         return True
 
     curr_channel_id = str(interaction.channel_id)
-    for target_id in allowed_ids:
-        if curr_channel_id == target_id:
-            return True
-        if hasattr(interaction.channel, "parent_id") and str(interaction.channel.parent_id) == target_id:
-            return True
+    cat_id = str(getattr(interaction.channel, "category_id", "") or "")
+
+    # 1. Match specific tracker channel IDs (main server)
+    if raw:
+        allowed_ids = [cid.strip() for cid in raw.split(",") if cid.strip()]
+        for target_id in allowed_ids:
+            if curr_channel_id == target_id:
+                return True
+            if hasattr(interaction.channel, "parent_id") and str(interaction.channel.parent_id) == target_id:
+                return True
+
+    # 2. Match parent category (new servers)
+    if allowed_categories and cat_id in allowed_categories:
+        return True
 
     return False
 
