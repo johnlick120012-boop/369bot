@@ -2018,10 +2018,18 @@ async def start_telegram_mirror():
             logger.error(f"Error in Telegram mirror event handler: {handler_err}")
 
     try:
-        if phone:
-            await client.start(phone=phone)
-        else:
-            await client.start()
+        await client.connect()
+        if not await client.is_user_authorized():
+            logger.error("=" * 80)
+            logger.error("TELEGRAM MIRROR AUTHENTICATION ERROR:")
+            logger.error("Your Telegram session is NOT authorized in the 'discordbot' folder.")
+            logger.error("To fix this and avoid entering a verification code:")
+            logger.error("Copy the file 'groq_userbot_session.session' from the 'telegram bot' folder")
+            logger.error("and paste it directly into this 'discordbot' folder.")
+            logger.error("=" * 80)
+            await client.disconnect()
+            return
+
         logger.info("Telegram Mirror: Connected and listening to Telegram updates.")
         await client.run_until_disconnected()
     except Exception as start_err:
