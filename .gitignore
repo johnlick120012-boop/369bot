@@ -1,0 +1,29 @@
+# ============================
+# SECRETS - NEVER PUSH THESE
+# ============================
+.env
+*.db
+premium.db
+verified_payments.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+bot.log
+
+# Local user data (backed up in Supabase)
+user_wallets.json
+
+# OS
+.DS_Store
+Thumbs.db

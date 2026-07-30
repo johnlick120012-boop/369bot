@@ -1,0 +1,17 @@
+[Unit]
+Description=369bot Discord Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/369bot
+ExecStart=/home/ubuntu/369bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=369bot
+
+[Install]
+WantedBy=multi-user.target
