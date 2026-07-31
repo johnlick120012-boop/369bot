@@ -27,3 +27,9 @@ user_wallets.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Telegram session and keys
+*.session
+*.session-journal
+gmgn_key
+gmgn_key.pub

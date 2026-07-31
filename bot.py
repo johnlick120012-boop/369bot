@@ -2279,25 +2279,49 @@ async def start_telegram_mirror():
         logger.error(f"Telegram Mirror: TELEGRAM_API_ID must be an integer, got: {api_id_str}")
         return
 
+    # Verify Discord channel at startup
+    try:
+        channel = bot.get_channel(int(discord_channel_id)) or await bot.fetch_channel(int(discord_channel_id))
+        if channel:
+            logger.info(f"Telegram Mirror: Verified Discord destination channel: #{channel.name} (ID: {discord_channel_id})")
+        else:
+            logger.error(f"Telegram Mirror: Discord destination channel ID {discord_channel_id} not found or is inaccessible.")
+    except Exception as chan_err:
+        logger.error(f"Telegram Mirror: Failed to verify Discord channel {discord_channel_id}: {chan_err}")
+
     logger.info("Initializing Telegram Mirror background client...")
     # Using 'groq_userbot_session' to reuse active local session credentials automatically
     client = TelegramClient('groq_userbot_session', api_id, api_hash)
 
-    @client.on(events.NewMessage(incoming=True))
+    target_peer_id = None
+
+    @client.on(events.NewMessage())
     async def mirror_handler(event):
+        nonlocal target_peer_id
         try:
-            chat = await event.get_chat()
-            if not chat:
+            # Skip outgoing messages sent by the userbot itself
+            if event.out:
                 return
 
             chat_id = event.chat_id
-            chat_username = getattr(chat, 'username', None)
 
             is_target = False
-            if chat_username and chat_username.lower() == source_chat.lower():
+            # Check by resolved peer ID first
+            if target_peer_id and chat_id == target_peer_id:
                 is_target = True
+            # Fallback to hardcoded IDs
             elif str(chat_id) in ("-1002242176791", "2242176791", "-2242176791"):
                 is_target = True
+            else:
+                # Retrieve chat username fallback (requires async API request)
+                chat = await event.get_chat()
+                if chat:
+                    chat_username = getattr(chat, 'username', None)
+                    if chat_username and chat_username.lower() == source_chat.lower():
+                        is_target = True
+                        # Update resolved target peer ID for subsequent messages
+                        from telethon import utils
+                        target_peer_id = utils.get_peer_id(chat)
 
             if not is_target:
                 return
@@ -2322,6 +2346,8 @@ async def start_telegram_mirror():
                     discord_content = discord_content[:1990] + "..."
                 await channel.send(discord_content)
                 logger.info(f"Telegram Mirror: Mirrored message from {sender_name} to Discord channel {discord_channel_id}.")
+            else:
+                logger.error(f"Telegram Mirror: Could not find or send to Discord channel {discord_channel_id}")
         except Exception as handler_err:
             logger.error(f"Error in Telegram mirror event handler: {handler_err}")
 
@@ -2337,6 +2363,15 @@ async def start_telegram_mirror():
             logger.error("=" * 80)
             await client.disconnect()
             return
+
+        # Resolve peer ID of the target channel once after connection
+        try:
+            target_entity = await client.get_entity(source_chat)
+            from telethon import utils
+            target_peer_id = utils.get_peer_id(target_entity)
+            logger.info(f"Telegram Mirror: Resolved target source chat '{source_chat}' to peer ID {target_peer_id}")
+        except Exception as resolve_err:
+            logger.warning(f"Telegram Mirror: Could not resolve target source chat '{source_chat}' to entity at startup: {resolve_err}")
 
         logger.info("Telegram Mirror: Connected and listening to Telegram updates.")
         await client.run_until_disconnected()
