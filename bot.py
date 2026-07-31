@@ -1873,6 +1873,9 @@ def check_tracker_channel_permission(interaction: discord.Interaction) -> bool:
     raw = (CUSTOM_TRACKER_CHANNEL_ID or "").strip()
     _raw_cat = os.getenv("ALLOWED_CATEGORY_IDS", "").strip()
     allowed_categories = set(c.strip() for c in _raw_cat.split(",") if c.strip())
+    # Ensure default category IDs are always allowed
+    allowed_categories.add("1531780360495435909")
+    allowed_categories.add("1446685586667732992")
 
     # If no restrictions are configured at all, allow everywhere
     if not raw and not allowed_categories:
@@ -3941,6 +3944,9 @@ CA_CHANNEL_ID = os.getenv("CA_CHANNEL_ID", "").strip()
 # Comma-separated category IDs — commands are ONLY allowed inside these categories (new server)
 _raw_cat = os.getenv("ALLOWED_CATEGORY_IDS", "").strip()
 ALLOWED_CATEGORY_IDS = set(c.strip() for c in _raw_cat.split(",") if c.strip())
+# Ensure default category IDs are always allowed
+ALLOWED_CATEGORY_IDS.add("1531780360495435909")
+ALLOWED_CATEGORY_IDS.add("1446685586667732992")
 
 def is_channel_allowed(channel) -> bool:
     """
