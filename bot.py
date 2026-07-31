@@ -2958,32 +2958,14 @@ async def checkuser_slash(interaction: discord.Interaction, query: str):
 
 # ----------------- SOLANA PAYMENT & UPGRADE SYSTEM -----------------
 
-VERIFIED_PAYMENTS_FILE = os.path.join(os.path.dirname(__file__), "verified_payments.json")
+# In-memory set of verified signature strings
+_verified_signatures = set()
 
 def is_signature_used(sig: str) -> bool:
-    if not os.path.exists(VERIFIED_PAYMENTS_FILE):
-        return False
-    try:
-        with open(VERIFIED_PAYMENTS_FILE, "r") as f:
-            used = json.load(f)
-            return sig in used
-    except Exception:
-        return False
+    return sig in _verified_signatures
 
 def mark_signature_used(sig: str):
-    used = []
-    if os.path.exists(VERIFIED_PAYMENTS_FILE):
-        try:
-            with open(VERIFIED_PAYMENTS_FILE, "r") as f:
-                used = json.load(f)
-        except Exception:
-            pass
-    used.append(sig)
-    try:
-        with open(VERIFIED_PAYMENTS_FILE, "w") as f:
-            json.dump(used, f)
-    except Exception as e:
-        logger.error(f"Failed to save verified payment signature: {e}")
+    _verified_signatures.add(sig)
 
 # In-memory session store: reference_pubkey -> {user_id, created_at, amount_usd, months}
 _payment_sessions: dict = {}
@@ -3692,7 +3674,8 @@ def load_user_wallets_data() -> dict:
                         })
                     return result
         except Exception as e:
-            logger.error(f"Supabase fetch error, falling back to local file: {e}")
+            logger.error(f"Supabase fetch error: {e}")
+            return {}
 
     if os.path.exists(USER_WALLETS_FILE):
         try:
@@ -3703,15 +3686,8 @@ def load_user_wallets_data() -> dict:
     return {}
 
 def save_user_wallets_data(data: dict):
-    # Always save to local file backup
-    try:
-        with open(USER_WALLETS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error saving {USER_WALLETS_FILE}: {e}")
-
-    # Sync to Supabase if configured
     if is_supabase_configured():
+        # Sync to Supabase only
         try:
             headers = {
                 "apikey": SUPABASE_KEY,
@@ -3740,6 +3716,14 @@ def save_user_wallets_data(data: dict):
                     pass
         except Exception as e:
             logger.error(f"Error syncing to Supabase: {e}")
+        return
+
+    # Fallback to local file backup only when Supabase is not configured
+    try:
+        with open(USER_WALLETS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error saving {USER_WALLETS_FILE}: {e}")
 
 def rebuild_all_tracked_wallets():
     global ALL_TRACKED_WALLETS
