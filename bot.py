@@ -749,10 +749,22 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
         total_holders = dist.get("total_holders", 0) if dist else 0
         holders_str = f" \u2022 \U0001f465 **Holders:** {int(total_holders):,}" if total_holders > 0 else ""
 
+    info = pair.get("info", {})
+    image_url = info.get("imageUrl") if info else None
+    
+    # Ensure ticker is always visible in the title
+    token_name = base_token.get('name', 'Unknown Token')
+    embed_title = f"\U0001f680 {token_name} ({ticker})"
+    
+    if image_url:
+        lens_link = f" \u2022 [🔍 Google Lens](https://lens.google.com/uploadbyurl?url={image_url})"
+    else:
+        lens_link = f" \u2022 [🔍 Google Search](https://www.google.com/search?q={ticker}+token)"
+
     embed = discord.Embed(
-        title=f"\U0001f680 {base_token.get('name', 'Unknown Token')}",
+        title=embed_title,
         description=(
-            f"**Ticker:** ${ticker}\n"
+            f"**Ticker:** ${ticker}{lens_link}\n"
             f"**Chain:** {chain_cfg['name']} {chain_cfg['icon']} \u2022 **DEX:** {dex_id.upper()}\n"
             f"\U0001f4c5 **Created:** {age_str}{holders_str}"
         ),
@@ -760,8 +772,6 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     )
     
     # Image thumbnail if available
-    info = pair.get("info", {})
-    image_url = info.get("imageUrl") if info else None
     if image_url:
         embed.set_thumbnail(url=image_url)
         
@@ -1297,6 +1307,14 @@ class TokenInfoView(discord.ui.View):
                     emoji = "🐦" if soc_type == "twitter" else ("💬" if soc_type == "telegram" else "🔗")
                     label = soc_type.capitalize()
                     self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=1 if chain_id == "solana" else None))
+
+        # Add Google Lens/Search button
+        image_url = info.get("imageUrl") if info else None
+        ticker = base_token.get('symbol', 'Unknown').upper()
+        if image_url:
+            self.add_item(discord.ui.Button(label="Google Lens", url=f"https://lens.google.com/uploadbyurl?url={image_url}", style=discord.ButtonStyle.link, emoji="🔍", row=1 if chain_id == "solana" else None))
+        else:
+            self.add_item(discord.ui.Button(label="Google Search", url=f"https://www.google.com/search?q={ticker}+token", style=discord.ButtonStyle.link, emoji="🔍", row=1 if chain_id == "solana" else None))
 
 
 class RefreshButton(discord.ui.Button):
