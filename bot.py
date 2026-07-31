@@ -3371,9 +3371,15 @@ class UpgradeView(discord.ui.View):
         
         # Solana Pay URL
         import urllib.parse
-        encoded_receiver = urllib.parse.quote(self.receiver_address)
-        encoded_reference = urllib.parse.quote(reference_pubkey)
-        solana_pay_uri = f"solana:{encoded_receiver}?amount={amount_sol}&reference={encoded_reference}&label=Premium+Upgrade&message=Discord+Upgrade"
+        amount_str = f"{amount_sol:.4f}".rstrip('0').rstrip('.')
+        query_params = {
+            "amount": amount_str,
+            "reference": reference_pubkey,
+            "label": "Premium Upgrade",
+            "message": "Discord Upgrade"
+        }
+        query_string = urllib.parse.urlencode(query_params, quote_via=urllib.parse.quote)
+        solana_pay_uri = f"solana:{self.receiver_address}?{query_string}"
         
         embed = discord.Embed(
             title="💸 Solana Payment",
@@ -3661,6 +3667,127 @@ async def listpremium_slash(interaction: discord.Interaction):
 
 # ----------------- MESSAGE LISTENER (AUTO-DETECT CA) -----------------
 
+def create_basic_token_embed(pair: Dict[str, Any]) -> discord.Embed:
+    """Creates a basic, lightweight Embed from a DexScreener token pair dictionary."""
+    base_token = pair.get("baseToken", {})
+    chain_id = pair.get("chainId", "")
+    dex_id = pair.get("dexId", "")
+    ca_address = base_token.get("address", "")
+    ticker = base_token.get('symbol', 'Unknown').upper()
+    token_name = base_token.get('name', 'Unknown Token')
+
+    # Get age
+    pair_created_at = pair.get("pairCreatedAt")
+    age_str = format_age(pair_created_at)
+
+    chain_cfg = get_chain_config(chain_id)
+    embed_color = chain_cfg.get("color", DEFAULT_COLOR)
+
+    # Get logo/image
+    info = pair.get("info", {})
+    image_url = info.get("imageUrl") if info else None
+    if not image_url:
+        image_url = "https://i.imgur.com/f94QG4v.png"
+    pair["resolved_image_url"] = image_url
+
+    embed = discord.Embed(
+        title=f"🚀 {token_name} ({ticker})",
+        description=(
+            f"**Ticker:** ${ticker}\n"
+            f"**Chain:** {chain_cfg['name']} {chain_cfg['icon']} \u2022 **DEX:** {dex_id.upper()}\n"
+            f"📅 **Created:** {age_str}"
+        ),
+        color=embed_color
+    )
+    embed.set_thumbnail(url=image_url)
+
+    # Key statistics
+    price_usd = pair.get("priceUsd")
+    price_formatted = format_price(price_usd)
+    mcap_val = pair.get("marketCap")
+    mcap_formatted = format_large_number(mcap_val)
+    liquidity_val = pair.get("liquidity", {}).get("usd")
+    liquidity_formatted = format_large_number(liquidity_val)
+    volume_24h = pair.get("volume", {}).get("h24")
+    vol_formatted = format_large_number(volume_24h)
+
+    # Price changes
+    price_changes = pair.get("priceChange", {})
+    change_5m = format_percentage(price_changes.get("m5"))
+    change_1h = format_percentage(price_changes.get("h1"))
+    change_24h = format_percentage(price_changes.get("h24"))
+
+    embed.add_field(name="💵 Price", value=f"`{price_formatted}`", inline=True)
+    embed.add_field(name="📊 Market Cap", value=f"`{mcap_formatted}`", inline=True)
+    embed.add_field(name="💧 Liquidity", value=f"`{liquidity_formatted}`", inline=True)
+    embed.add_field(name="📈 24h Volume", value=f"`{vol_formatted}`", inline=True)
+
+    change_str = (
+        f"**5m:** {change_5m}\n"
+        f"**1h:** {change_1h}\n"
+        f"**24h:** {change_24h}"
+    )
+    embed.add_field(name="⚡ Price Changes", value=change_str, inline=False)
+    embed.add_field(name="📝 Contract Address", value=f"`{ca_address}`", inline=False)
+
+    return embed
+
+
+class BasicTokenInfoView(discord.ui.View):
+    """Stateless link buttons for basic auto-detected token info."""
+    def __init__(self, pair: Dict[str, Any]):
+        super().__init__(timeout=None)
+        self.pair = pair
+        self.add_action_buttons()
+
+    def add_action_buttons(self):
+        chain_id = self.pair.get("chainId", "")
+        base_token = self.pair.get("baseToken", {})
+        ca_address = base_token.get("address", "")
+        pair_address = self.pair.get("pairAddress", "")
+        
+        if chain_id == "solana":
+            self.add_item(discord.ui.Button(label="Axiom", url=f"https://axiom.trade/meme/{pair_address}?chain=sol&pulseChains=sol&trackerChains=sol,robinhood,bnb,eth", style=discord.ButtonStyle.link, emoji="🎯"))
+            self.add_item(discord.ui.Button(label="Padre", url=f"https://trade.padre.gg/token/{ca_address}", style=discord.ButtonStyle.link, emoji="🦅"))
+            self.add_item(discord.ui.Button(label="GMGN", url=f"https://gmgn.ai/sol/token/{ca_address}", style=discord.ButtonStyle.link, emoji="🐸"))
+            self.add_item(discord.ui.Button(label="Pump.fun", url=f"https://pump.fun/coin/{ca_address}", style=discord.ButtonStyle.link, emoji="💊"))
+        else:
+            pair_url = self.pair.get("url")
+            if pair_url:
+                self.add_item(discord.ui.Button(label="View on DexScreener", url=pair_url, style=discord.ButtonStyle.link, emoji="📊"))
+                
+            chain_cfg = get_chain_config(chain_id)
+            buy_url = chain_cfg.get("buy_url")
+            if buy_url and ca_address:
+                full_buy_url = f"{buy_url}{ca_address}"
+                self.add_item(discord.ui.Button(label=f"Buy on {chain_cfg['name']}", url=full_buy_url, style=discord.ButtonStyle.link, emoji="💳"))
+            
+        info = self.pair.get("info", {})
+        if info:
+            websites = info.get("websites", [])
+            if websites and len(websites) > 0:
+                self.add_item(discord.ui.Button(label="Website", url=websites[0].get("url"), style=discord.ButtonStyle.link, emoji="🌐", row=1 if chain_id == "solana" else None))
+                
+            socials = info.get("socials", [])
+            for social in socials[:2]:
+                soc_type = social.get("type", "").lower()
+                soc_url = social.get("url")
+                if soc_url:
+                    emoji = "🐦" if soc_type == "twitter" else ("💬" if soc_type == "telegram" else "🔗")
+                    label = soc_type.capitalize()
+                    self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=1 if chain_id == "solana" else None))
+
+        image_url = self.pair.get("resolved_image_url")
+        if image_url and image_url != "https://i.imgur.com/f94QG4v.png":
+            self.add_item(discord.ui.Button(
+                label="Image Search",
+                url=f"https://lens.google.com/uploadbyurl?url={image_url}",
+                style=discord.ButtonStyle.link,
+                emoji="🔍",
+                row=1 if chain_id == "solana" else None
+            ))
+
+
 @bot.event
 async def on_message(message: discord.Message):
     # Ignore messages sent by the bot itself
@@ -3674,29 +3801,32 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
         
-    # Search for EVM and Solana contract addresses in message content
-    evm_matches = EVM_REGEX.findall(message.content)
-    sol_matches = SOL_REGEX.findall(message.content)
-    
-    # Combine matches, remove duplicates
-    all_cas = list(set(evm_matches + sol_matches))
-    
-    if all_cas:
-        # Limit to fetching 2 CAs at a time to prevent spam
-        for ca in all_cas[:2]:
-            logger.info(f"Auto-detected contract address: {ca} in message from {message.author}")
-            try:
-                pairs = await api_client.get_token_by_ca(ca)
-                if pairs:
-                    # Token found! Send details
-                    primary_pair = pairs[0]
-                    embed = await create_token_embed(primary_pair)
-                    view = TokenInfoView(primary_pair, user_id=message.author.id)
-                    # Reply directly to the message containing the address
-                    await message.reply(embed=embed, view=view, mention_author=False)
-                    logger.info(f"Successfully replied with info for CA: {ca}")
-            except Exception as e:
-                logger.error(f"Error handling auto-detected CA {ca}: {e}")
+    # Auto-detect CAs only in category 1446685586667732992
+    category_id = getattr(message.channel, "category_id", None)
+    if category_id and str(category_id) == "1446685586667732992":
+        # Search for EVM and Solana contract addresses in message content
+        evm_matches = EVM_REGEX.findall(message.content)
+        sol_matches = SOL_REGEX.findall(message.content)
+        
+        # Combine matches, remove duplicates
+        all_cas = list(set(evm_matches + sol_matches))
+        
+        if all_cas:
+            # Limit to fetching 2 CAs at a time to prevent spam
+            for ca in all_cas[:2]:
+                logger.info(f"Auto-detected contract address: {ca} in message from {message.author} in category 1446685586667732992")
+                try:
+                    pairs = await api_client.get_token_by_ca(ca)
+                    if pairs:
+                        # Token found! Send details
+                        primary_pair = pairs[0]
+                        embed = create_basic_token_embed(primary_pair)
+                        view = BasicTokenInfoView(primary_pair)
+                        # Reply directly to the message containing the address
+                        await message.reply(embed=embed, view=view, mention_author=False)
+                        logger.info(f"Successfully replied with basic info for CA: {ca}")
+                except Exception as e:
+                    logger.error(f"Error handling auto-detected CA {ca}: {e}")
                 
     # Allow command processing for non-prefix messages containing prefix commands (unusual but good practice)
     await bot.process_commands(message)
