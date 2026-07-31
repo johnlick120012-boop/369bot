@@ -1531,6 +1531,24 @@ class UserAlertView(discord.ui.View):
 
     @discord.ui.button(label="Token Stats", style=discord.ButtonStyle.primary, emoji="📊")
     async def btn_token_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import asyncio
+        uid = str(interaction.user.id)
+        allowed, count = await asyncio.get_event_loop().run_in_executor(
+            None, premium_db.check_and_increment_usage, uid, "token_stats", 10
+        )
+        if not allowed:
+            embed = discord.Embed(
+                title="🔒 Daily Limit Reached",
+                description=(
+                    "Non-paid users can only click **Token Stats** **10 times per day**.\n"
+                    "You've used all 10 clicks today.\n\n"
+                    "Upgrade to **Premium** for just **$49/month** for unlimited access!"
+                ),
+                color=0xFF3B30
+            )
+            await interaction.response.send_message(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), ephemeral=True)
+            return
+
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
@@ -1548,6 +1566,24 @@ class UserAlertView(discord.ui.View):
 
     @discord.ui.button(label="Token Analyser", style=discord.ButtonStyle.success, emoji="🔍")
     async def btn_token_analyser(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import asyncio
+        uid = str(interaction.user.id)
+        allowed, count = await asyncio.get_event_loop().run_in_executor(
+            None, premium_db.check_and_increment_usage, uid, "token_analyser", 10
+        )
+        if not allowed:
+            embed = discord.Embed(
+                title="🔒 Daily Limit Reached",
+                description=(
+                    "Non-paid users can only click **Token Analyser** **10 times per day**.\n"
+                    "You've used all 10 clicks today.\n\n"
+                    "Upgrade to **Premium** for just **$49/month** for unlimited access!"
+                ),
+                color=0xFF3B30
+            )
+            await interaction.response.send_message(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), ephemeral=True)
+            return
+
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
