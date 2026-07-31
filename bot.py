@@ -3667,18 +3667,15 @@ async def listpremium_slash(interaction: discord.Interaction):
 
 # ----------------- MESSAGE LISTENER (AUTO-DETECT CA) -----------------
 
-def create_basic_token_embed(pair: Dict[str, Any]) -> discord.Embed:
-    """Creates a basic, lightweight Embed from a DexScreener token pair dictionary."""
+# ----------------- MESSAGE LISTENER (AUTO-DETECT CA) -----------------
+
+def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]] = None) -> discord.Embed:
+    """Creates a highly concise, mobile-optimized Embed from a DexScreener token pair dictionary."""
     base_token = pair.get("baseToken", {})
     chain_id = pair.get("chainId", "")
-    dex_id = pair.get("dexId", "")
     ca_address = base_token.get("address", "")
     ticker = base_token.get('symbol', 'Unknown').upper()
     token_name = base_token.get('name', 'Unknown Token')
-
-    # Get age
-    pair_created_at = pair.get("pairCreatedAt")
-    age_str = format_age(pair_created_at)
 
     chain_cfg = get_chain_config(chain_id)
     embed_color = chain_cfg.get("color", DEFAULT_COLOR)
@@ -3690,20 +3687,7 @@ def create_basic_token_embed(pair: Dict[str, Any]) -> discord.Embed:
         image_url = "https://i.imgur.com/f94QG4v.png"
     pair["resolved_image_url"] = image_url
 
-    embed = discord.Embed(
-        title=f"🚀 {token_name} ({ticker})",
-        description=(
-            f"**Ticker:** ${ticker}\n"
-            f"**Chain:** {chain_cfg['name']} {chain_cfg['icon']} \u2022 **DEX:** {dex_id.upper()}\n"
-            f"📅 **Created:** {age_str}"
-        ),
-        color=embed_color
-    )
-    embed.set_thumbnail(url=image_url)
-
     # Key statistics
-    price_usd = pair.get("priceUsd")
-    price_formatted = format_price(price_usd)
     mcap_val = pair.get("marketCap")
     mcap_formatted = format_large_number(mcap_val)
     liquidity_val = pair.get("liquidity", {}).get("usd")
@@ -3715,20 +3699,48 @@ def create_basic_token_embed(pair: Dict[str, Any]) -> discord.Embed:
     price_changes = pair.get("priceChange", {})
     change_5m = format_percentage(price_changes.get("m5"))
     change_1h = format_percentage(price_changes.get("h1"))
-    change_24h = format_percentage(price_changes.get("h24"))
 
-    embed.add_field(name="💵 Price", value=f"`{price_formatted}`", inline=True)
-    embed.add_field(name="📊 Market Cap", value=f"`{mcap_formatted}`", inline=True)
-    embed.add_field(name="💧 Liquidity", value=f"`{liquidity_formatted}`", inline=True)
-    embed.add_field(name="📈 24h Volume", value=f"`{vol_formatted}`", inline=True)
+    # Distribution Stats (Bundles / Snipers)
+    dist = get_distribution_stats(rug_report) if chain_id == "solana" else {}
+    
+    # Format Bundles / Snipers cleanly
+    bundler_pct = dist.get("bundler_pct")
+    if bundler_pct is None:
+        bundler_str = "N/A"
+    else:
+        clusters = dist.get("bundler_clusters", 0)
+        if clusters > 0:
+            bundler_str = f"{bundler_pct} ({clusters} clusters)"
+        else:
+            bundler_str = f"{bundler_pct}"
 
-    change_str = (
-        f"**5m:** {change_5m}\n"
-        f"**1h:** {change_1h}\n"
-        f"**24h:** {change_24h}"
+    sniper_pct = dist.get("sniper_pct")
+    sniper_str = f"{sniper_pct}" if sniper_pct else "N/A"
+
+    # Single-field description or compact fields for phone screen compatibility
+    description = (
+        f"💎 **MCap:** `{mcap_formatted}`  \u2022  💧 **Liq:** `{liquidity_formatted}`\n"
+        f"📈 **24h Vol:** `{vol_formatted}`\n"
+        f"⚡ **5m:** {change_5m}  \u2022  **1h:** {change_1h}\n"
     )
-    embed.add_field(name="⚡ Price Changes", value=change_str, inline=False)
-    embed.add_field(name="📝 Contract Address", value=f"`{ca_address}`", inline=False)
+    
+    if chain_id == "solana":
+        description += (
+            f"📦 **Bundles:** `{bundler_str}`\n"
+            f"🎯 **Snipers:** `{sniper_str}`\n"
+        )
+
+    description += (
+        f"\n📝 **CA:** `{ca_address}`\n\n"
+        f"💡 *For full developer wallet track record, fresh wallets count, holder list, and security audits, run the command:* `/ca {ca_address}`"
+    )
+
+    embed = discord.Embed(
+        title=f"🚀 {token_name} ({ticker})",
+        description=description,
+        color=embed_color
+    )
+    embed.set_thumbnail(url=image_url)
 
     return embed
 
@@ -3818,9 +3830,14 @@ async def on_message(message: discord.Message):
                 try:
                     pairs = await api_client.get_token_by_ca(ca)
                     if pairs:
-                        # Token found! Send details
                         primary_pair = pairs[0]
-                        embed = create_basic_token_embed(primary_pair)
+                        rug_report = None
+                        if primary_pair.get("chainId") == "solana":
+                            try:
+                                rug_report = await api_client.get_rugcheck_report(ca)
+                            except Exception as ree:
+                                logger.error(f"Error fetching RugCheck report in auto-detect: {ree}")
+                        embed = create_basic_token_embed(primary_pair, rug_report)
                         view = BasicTokenInfoView(primary_pair)
                         # Reply directly to the message containing the address
                         await message.reply(embed=embed, view=view, mention_author=False)
