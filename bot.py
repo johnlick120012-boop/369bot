@@ -1185,23 +1185,24 @@ class UpgradeButton(discord.ui.Button):
         embed.add_field(
             name="🚀 Premium Perks",
             value=(
-                "• **Unlimited `/ca` queries** (Free: 10/day)\n"
-                "• **Unlimited `/checkuser` audits** (Free: 5/day)\n"
-                "• **Track up to 50 custom wallets** (Free: Blocked)\n"
-                "• **KOL Tracker & Insider Bundler scans** (Free: Blocked)"
+                "• **Unlimited `/ca` queries** — Run contract address security scans without daily limits.\n"
+                "• **Track up to 250 custom wallets** — Add and track wallets with `/addwallet`.\n"
+                "• **Add X accounts for tracking** — Monitor and track X (Twitter) accounts.\n"
+                "• **Alpha Trader Calls** — Get real-time calls from alpha traders across FOMO and Pump.\n"
+                "• **Advanced Coin Analysis** — Deep security scans, RugCheck, and X-account checks."
             ),
             inline=False
         )
         embed.add_field(
-            name="💰 Price",
-            value="Only **$1.00 USD** per month!",
+            name="💰 Pricing Options",
+            value="**$49 USD** / month OR **$300 USD** / year (Save 50%!)",
             inline=False
         )
-        embed.set_footer(text="Click 'Pay $1' below to proceed with Solana payment.")
+        embed.set_footer(text="Click a plan below to proceed with Solana payment.")
         
         await interaction.response.send_message(
             embed=embed, 
-            view=UpgradeView(SOLANA_PAYMENT_ADDRESS), 
+            view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), 
             ephemeral=True
         )
 
@@ -1878,12 +1879,12 @@ async def process_add_wallet(interaction: discord.Interaction, arg1: str, arg2: 
             title="🔒 Premium Feature",
             description=(
                 "The `/addwallet` command is a **premium-only** feature.\n\n"
-                "Upgrade to premium for just **$1/month** to track up to 50 custom wallets "
+                "Upgrade to premium for just **$49/month** to track up to 250 custom wallets "
                 "and receive real-time alerts in your private thread!"
             ),
             color=0xFFD700
         )
-        await interaction.followup.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), ephemeral=True)
         return
 
     if not check_tracker_channel_permission(interaction):
@@ -1918,7 +1919,7 @@ async def process_add_wallet(interaction: discord.Interaction, arg1: str, arg2: 
 
     user_data_all = load_user_wallets_data()
     uinfo = user_data_all.get(uid, {"thread_id": None, "wallets": []})
-    limit = 50  # already confirmed premium above
+    limit = 250  # already confirmed premium above
 
     wallets = uinfo.get("wallets", [])
     if len(wallets) >= limit:
@@ -2038,7 +2039,7 @@ async def wallet_list(interaction: discord.Interaction):
         return
         
     is_paid = premium_db.is_premium(uid)
-    limit = 50 if is_paid else 0
+    limit = 250 if is_paid else 0
     
     embed = discord.Embed(
         title=f"🔔 {interaction.user.display_name}'s Tracked Wallets ({len(wallets)}/{limit})",
@@ -2432,11 +2433,11 @@ async def ca_prefix(ctx, address: str):
             description=(
                 "Non-paid users can only use `/ca` **10 times per day**.\n"
                 f"You've used all 10 queries today.\n\n"
-                "Upgrade to **Premium** for just **$1/month** for unlimited access!"
+                "Upgrade to **Premium** for just **$49/month** for unlimited access!"
             ),
             color=0xFF3B30
         )
-        await ctx.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS))
+        await ctx.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True))
         return
 
     async with ctx.typing():
@@ -2481,11 +2482,11 @@ async def ca_slash(interaction: discord.Interaction, address: str):
             description=(
                 "Non-paid users can only use `/ca` **10 times per day**.\n"
                 f"You've used all 10 queries today.\n\n"
-                "Upgrade to **Premium** for just **$1/month** for unlimited access!"
+                "Upgrade to **Premium** for just **$49/month** for unlimited access!"
             ),
             color=0xFF3B30
         )
-        await interaction.response.send_message(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), ephemeral=True)
         return
 
     try:
@@ -2869,11 +2870,11 @@ async def checkuser_prefix(ctx, *, query: str):
             description=(
                 "Non-paid users can only use `/checkuser` **5 times per day**.\n"
                 f"You've used all 5 audits today.\n\n"
-                "Upgrade to **Premium** for just **$1/month** for unlimited access!"
+                "Upgrade to **Premium** for just **$49/month** for unlimited access!"
             ),
             color=0xFF3B30
         )
-        await ctx.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS))
+        await ctx.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True))
         return
 
     async with ctx.typing():
@@ -2892,11 +2893,11 @@ async def checkuser_slash(interaction: discord.Interaction, query: str):
             description=(
                 "Non-paid users can only use `/checkuser` **5 times per day**.\n"
                 f"You've used all 5 audits today.\n\n"
-                "Upgrade to **Premium** for just **$1/month** for unlimited access!"
+                "Upgrade to **Premium** for just **$49/month** for unlimited access!"
             ),
             color=0xFF3B30
         )
-        await interaction.response.send_message(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), ephemeral=True)
         return
 
     try:
@@ -2969,7 +2970,7 @@ def pop_payment_session(reference: str) -> dict | None:
         return None
     return session
 
-async def split_funds_via_jito(amount_sol: float, is_yearly: bool):
+async def split_funds_via_jito(amount_sol: float, amount_usd: float):
     """Splits received funds and submits transaction privately via Jito to prevent MEV."""
     try:
         priv_key_str = os.getenv("SOLANA_PRIVATE_KEY")
@@ -3015,11 +3016,13 @@ async def split_funds_via_jito(amount_sol: float, is_yearly: bool):
         if net_lamports <= 0:
             return
             
-        if is_yearly:
+        # Split equally (50/50) for both $49 and $300 payments
+        if amount_usd == 49.0 or amount_usd == 300.0:
             lamports_a = net_lamports // 2
             lamports_b = net_lamports - lamports_a
         else:
-            lamports_a = int(net_lamports * 0.10)
+            # Default fallback split
+            lamports_a = net_lamports // 2
             lamports_b = net_lamports - lamports_a
             
         ix_a = transfer(TransferParams(from_pubkey=sender.pubkey(), to_pubkey=pubkey_a, lamports=lamports_a))
@@ -3181,8 +3184,7 @@ class PaymentVerificationView(discord.ui.View):
                 expiry = premium_db.add_premium_user(str(interaction.user.id), interaction.user.name, self.months)
                 
                 # Trigger Jito split async task
-                is_yearly = self.months >= 12
-                bot.loop.create_task(split_funds_via_jito(sol_received, is_yearly))
+                bot.loop.create_task(split_funds_via_jito(sol_received, self.amount_usd))
                 
             except Exception as e:
                 logger.error(f"Payment verified but premium activation failed for {interaction.user.id}: {e}")
@@ -3317,13 +3319,17 @@ async def upgrade_prefix(ctx):
             title="💎 My Subscription",
             description=(
                 "You are currently subscribed to **MemecoinBot Premium**!\n\n"
-                "**Want to save 50%?** Upgrade to the Yearly Plan for only **$300 USD** below."
+                "You can extend or upgrade your subscription using the options below."
             ),
             color=0x00FFA3
         )
-        embed.add_field(name="💰 Yearly Plan", value="$300 USD per year (50% discount)", inline=False)
-        embed.set_footer(text="Click 'Pay Yearly' below to proceed with Solana payment.")
-        await ctx.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=False))
+        embed.add_field(
+            name="💰 Subscription Options",
+            value="**$49 USD** / month OR **$300 USD** / year (Save 50%!)",
+            inline=False
+        )
+        embed.set_footer(text="Click a plan below to proceed with Solana payment.")
+        await ctx.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True))
         return
 
     embed = discord.Embed(
@@ -3337,11 +3343,11 @@ async def upgrade_prefix(ctx):
     embed.add_field(
         name="🚀 Premium Perks",
         value=(
-            "• **Unlimited `/ca` queries** — Run contract address security scans without limits.\n"
-            "• **Unlimited `/checkuser` audits** — Scan Twitter handles and rebranding histories on demand.\n"
-            "• **Track up to 50 custom wallets** — Get real-time alerts inside your private channel thread.\n"
-            "• **KOL Tracker & Insider Bundler scans** — Detect coordinated insider transactions instantly.\n"
-            "• **Multi-Server Access** — Use your premium benefits across all allowed channels & servers."
+            "• **Unlimited `/ca` queries** — Run contract address security scans without daily limits.\n"
+            "• **Track up to 250 custom wallets** — Add and track wallets with `/addwallet`.\n"
+            "• **Add X accounts for tracking** — Monitor and track X (Twitter) accounts.\n"
+            "• **Alpha Trader Calls** — Get real-time calls from alpha traders across FOMO and Pump.\n"
+            "• **Advanced Coin Analysis** — Deep security scans, RugCheck, and X-account checks."
         ),
         inline=False
     )
@@ -3371,13 +3377,17 @@ async def upgrade_slash(interaction: discord.Interaction):
             title="💎 My Subscription",
             description=(
                 "You are currently subscribed to **MemecoinBot Premium**!\n\n"
-                "**Want to save 50%?** Upgrade to the Yearly Plan for only **$300 USD** below."
+                "You can extend or upgrade your subscription using the options below."
             ),
             color=0x00FFA3
         )
-        embed.add_field(name="💰 Yearly Plan", value="$300 USD per year (50% discount)", inline=False)
-        embed.set_footer(text="Click 'Pay Yearly' below to proceed with Solana payment.")
-        await interaction.followup.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=False), ephemeral=True)
+        embed.add_field(
+            name="💰 Subscription Options",
+            value="**$49 USD** / month OR **$300 USD** / year (Save 50%!)",
+            inline=False
+        )
+        embed.set_footer(text="Click a plan below to proceed with Solana payment.")
+        await interaction.followup.send(embed=embed, view=UpgradeView(SOLANA_PAYMENT_ADDRESS, show_monthly=True), ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -3391,11 +3401,11 @@ async def upgrade_slash(interaction: discord.Interaction):
     embed.add_field(
         name="🚀 Premium Perks",
         value=(
-            "• **Unlimited `/ca` queries** — Run contract address security scans without limits.\n"
-            "• **Unlimited `/checkuser` audits** — Scan Twitter handles and rebranding histories on demand.\n"
-            "• **Track up to 50 custom wallets** — Get real-time alerts inside your private channel thread.\n"
-            "• **KOL Tracker & Insider Bundler scans** — Detect coordinated insider transactions instantly.\n"
-            "• **Multi-Server Access** — Use your premium benefits across all allowed channels & servers."
+            "• **Unlimited `/ca` queries** — Run contract address security scans without daily limits.\n"
+            "• **Track up to 250 custom wallets** — Add and track wallets with `/addwallet`.\n"
+            "• **Add X accounts for tracking** — Monitor and track X (Twitter) accounts.\n"
+            "• **Alpha Trader Calls** — Get real-time calls from alpha traders across FOMO and Pump.\n"
+            "• **Advanced Coin Analysis** — Deep security scans, RugCheck, and X-account checks."
         ),
         inline=False
     )
@@ -3414,10 +3424,10 @@ async def upgrade_slash(interaction: discord.Interaction):
 @bot.command(name="addpremium")
 async def addpremium_prefix(ctx, user: discord.User, months: int = 1):
     """[Admin Only] Grant premium subscription status to a user for a given number of months."""
-    is_owner = await ctx.bot.is_owner(ctx.author)
-    is_admin = ctx.author.guild_permissions.administrator if ctx.guild else False
-    if not (is_owner or is_admin):
-        await ctx.send("❌ You do not have permission to use this command (requires Administrator or Bot Owner).")
+    author_name = ctx.author.name.lower()
+    author_id = ctx.author.id
+    if author_id != 1248988195006447688 and author_name not in ("dancryptic", "dancrytic"):
+        await ctx.send("❌ Only @dancryptic can assign premium to a user.")
         return
 
     try:
@@ -3438,10 +3448,10 @@ async def addpremium_prefix(ctx, user: discord.User, months: int = 1):
 @app_commands.describe(user="The user to grant premium status to", months="Number of months of premium (default 1)")
 async def addpremium_slash(interaction: discord.Interaction, user: discord.User, months: int = 1):
     """Slash command to grant premium subscription status to a user."""
-    is_owner = await bot.is_owner(interaction.user)
-    is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
-    if not (is_owner or is_admin):
-        await interaction.response.send_message("❌ You do not have permission to use this command (requires Administrator or Bot Owner).", ephemeral=True)
+    author_name = interaction.user.name.lower()
+    author_id = interaction.user.id
+    if author_id != 1248988195006447688 and author_name not in ("dancryptic", "dancrytic"):
+        await interaction.response.send_message("❌ Only @dancryptic can assign premium to a user.", ephemeral=True)
         return
 
     try:
@@ -3461,10 +3471,10 @@ async def addpremium_slash(interaction: discord.Interaction, user: discord.User,
 @bot.command(name="removepremium")
 async def removepremium_prefix(ctx, user: discord.User):
     """[Admin Only] Remove premium subscription status from a user."""
-    is_owner = await ctx.bot.is_owner(ctx.author)
-    is_admin = ctx.author.guild_permissions.administrator if ctx.guild else False
-    if not (is_owner or is_admin):
-        await ctx.send("❌ You do not have permission to use this command (requires Administrator or Bot Owner).")
+    author_name = ctx.author.name.lower()
+    author_id = ctx.author.id
+    if author_id != 1248988195006447688 and author_name not in ("dancryptic", "dancrytic"):
+        await ctx.send("❌ Only @dancryptic can remove premium from a user.")
         return
 
     try:
@@ -3483,10 +3493,10 @@ async def removepremium_prefix(ctx, user: discord.User):
 @app_commands.describe(user="The user to remove premium status from")
 async def removepremium_slash(interaction: discord.Interaction, user: discord.User):
     """Slash command to remove premium subscription status from a user."""
-    is_owner = await bot.is_owner(interaction.user)
-    is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
-    if not (is_owner or is_admin):
-        await interaction.response.send_message("❌ You do not have permission to use this command (requires Administrator or Bot Owner).", ephemeral=True)
+    author_name = interaction.user.name.lower()
+    author_id = interaction.user.id
+    if author_id != 1248988195006447688 and author_name not in ("dancryptic", "dancrytic"):
+        await interaction.response.send_message("❌ Only @dancryptic can remove premium from a user.", ephemeral=True)
         return
 
     try:
