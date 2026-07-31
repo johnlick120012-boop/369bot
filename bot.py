@@ -2327,25 +2327,104 @@ async def start_telegram_mirror():
                 return
 
             text = event.message.message or ""
-            if not text:
+            # Allow messages with only media or text
+            if not text and not event.message.media:
                 return
 
-            sender_name = "KOL"
-            try:
-                sender = await event.get_sender()
-                if sender:
-                    sender_name = getattr(sender, 'first_name', '') or getattr(sender, 'username', '') or "Member"
-            except Exception:
-                pass
+            # Extract Ticker
+            import re
+            ticker = None
+            ticker_match = re.search(r'\$[A-Za-z0-9_]+', text)
+            if ticker_match:
+                ticker = ticker_match.group(0).upper()
+
+            # Extract Solana Contract Address
+            ca = None
+            ca_matches = re.findall(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b', text)
+            for match in ca_matches:
+                if any(c.isdigit() for c in match) and any(c.isalpha() for c in match):
+                    ca = match
+                    break
+            if not ca and ca_matches:
+                ca = ca_matches[0]
+
+            # Extract Links (Twitter/X, Website)
+            urls = re.findall(r'https?://[^\s)]+', text)
+            x_links = []
+            web_links = []
+            for url in urls:
+                if "twitter.com" in url.lower() or "x.com" in url.lower():
+                    x_links.append(url)
+                elif "t.me" in url.lower() or "telegram" in url.lower():
+                    pass
+                else:
+                    web_links.append(url)
+
+            # Build a cleaner description
+            clean_desc = text
+            if ca:
+                clean_desc = clean_desc.replace(ca, "")
+            for url in urls:
+                clean_desc = clean_desc.replace(url, "")
+            
+            clean_desc = re.sub(r'\n\s*\n+', '\n\n', clean_desc).strip()
+
+            # Download media if present
+            import io
+            media_bytes = None
+            media_filename = "image.png"
+            if event.message.media:
+                if hasattr(event.message, 'photo') and event.message.photo:
+                    media_bytes = await event.message.download_media(file=bytes)
+                    media_filename = "photo.jpg"
+                elif hasattr(event.message, 'document') and event.message.document:
+                    mime = getattr(event.message.document, 'mime_type', '')
+                    if mime.startswith('image/'):
+                        media_bytes = await event.message.download_media(file=bytes)
+                        media_filename = "photo.jpg"
+
+            # Construct Discord Embed
+            embed_title = "📢 Solana CTO Tracker Alert"
+            if ticker:
+                embed_title = f"📢 CTO Tracker | {ticker}"
+            
+            embed = discord.Embed(
+                title=embed_title,
+                description=clean_desc if clean_desc else "New update posted.",
+                color=0x9b59b6
+            )
+
+            if ca:
+                embed.add_field(name="🔑 Contract Address", value=f"`{ca}`", inline=False)
+                analysis_tools = (
+                    f"🔗 [Dexscreener](https://dexscreener.com/solana/{ca}) | "
+                    f"[RugCheck](https://rugcheck.xyz/tokens/{ca}) | "
+                    f"[GMGN](https://gmgn.ai/sol/token/{ca}) | "
+                    f"[Solscan](https://solscan.io/token/{ca})"
+                )
+                embed.add_field(name="📊 Analysis Links", value=analysis_tools, inline=False)
+
+            # Attached Links
+            links_value = []
+            if x_links:
+                links_value.append(f"🐦 [Twitter/X]({x_links[0]})")
+            if web_links:
+                links_value.append(f"🌐 [Website]({web_links[0]})")
+            if links_value:
+                embed.add_field(name="🔗 Attached Links", value=" • ".join(links_value), inline=False)
+
+            embed.set_footer(text="ctotrackersol mirror • 369bot")
 
             # Dispatch to configured Discord channel
             channel = bot.get_channel(int(discord_channel_id)) or await bot.fetch_channel(int(discord_channel_id))
             if channel:
-                discord_content = f"**[Telegram - {source_chat}]** {sender_name}: {text}"
-                if len(discord_content) > 2000:
-                    discord_content = discord_content[:1990] + "..."
-                await channel.send(discord_content)
-                logger.info(f"Telegram Mirror: Mirrored message from {sender_name} to Discord channel {discord_channel_id}.")
+                if media_bytes:
+                    file = discord.File(io.BytesIO(media_bytes), filename=media_filename)
+                    embed.set_image(url=f"attachment://{media_filename}")
+                    await channel.send(embed=embed, file=file)
+                else:
+                    await channel.send(embed=embed)
+                logger.info(f"Telegram Mirror: Mirrored message from ctotrackersol as embed to Discord channel {discord_channel_id}.")
             else:
                 logger.error(f"Telegram Mirror: Could not find or send to Discord channel {discord_channel_id}")
         except Exception as handler_err:
