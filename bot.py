@@ -51,6 +51,25 @@ def get_solana_rpc_urls():
     
     return http_url, wss_url
 
+def get_solana_wss_urls() -> List[str]:
+    """Returns a list of WebSocket URLs to try, in order of priority."""
+    key1 = (os.getenv("HELIUS_API_KEY") or "").strip()
+    key2 = (os.getenv("HELIUS_API_KEY_2") or "").strip()
+    
+    urls = []
+    if key1:
+        urls.append(f"wss://mainnet.helius-rpc.com/?api-key={key1}")
+    if key2:
+        urls.append(f"wss://mainnet.helius-rpc.com/?api-key={key2}")
+    
+    fallback = os.getenv("SOLANA_RPC_WSS")
+    if fallback:
+        urls.append(fallback)
+    else:
+        urls.append("wss://api.mainnet-beta.solana.com")
+        
+    return urls
+
 # Discord intents setup
 intents = discord.Intents.default()
 intents.message_content = True
@@ -4362,77 +4381,89 @@ async def process_kol_signature(sig: str, tracked_wallets: dict):
             logger.error(f"Error processing KOL transaction signature {sig}: {e}")
 
 async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
-    _, uri = get_solana_rpc_urls()
     logger.info(f"[KOL Worker {worker_id}] Starting for {len(wallets_chunk)} wallets...")
     subscribed_addrs = set(wallets_chunk)
     
     while True:
-        try:
-            async with websockets.connect(uri) as websocket:
-                logger.info(f"[KOL Worker {worker_id}] Connected to Solana WebSocket.")
-                
-                req_id = 1
-                for addr in list(subscribed_addrs):
-                    req = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "method": "logsSubscribe",
-                        "params": [
-                            {"mentions": [addr]},
-                            {"commitment": "confirmed"}
-                        ]
-                    }
-                    req_id += 1
-                    await websocket.send(json.dumps(req))
-                    await websocket.recv()
+        uris = get_solana_wss_urls()
+        connected = False
+        
+        for uri in uris:
+            masked_uri = re.sub(r"api-key=[^&]+", "api-key=****", uri)
+            try:
+                logger.info(f"[KOL Worker {worker_id}] Connecting to {masked_uri}...")
+                async with websockets.connect(uri) as websocket:
+                    connected = True
+                    logger.info(f"[KOL Worker {worker_id}] Connected to Solana WebSocket.")
                     
-                logger.info(f"[KOL Worker {worker_id}] Subscribed to all {len(subscribed_addrs)} wallets.")
-                
-                while True:
-                    # Drain dynamic subscription queue for new user-added wallets
-                    while not DYNAMIC_SUBSCRIPTION_QUEUE.empty():
+                    req_id = 1
+                    for addr in list(subscribed_addrs):
+                        req = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "method": "logsSubscribe",
+                            "params": [
+                                {"mentions": [addr]},
+                                {"commitment": "confirmed"}
+                            ]
+                        }
+                        req_id += 1
+                        await websocket.send(json.dumps(req))
+                        await websocket.recv()
+                        
+                    logger.info(f"[KOL Worker {worker_id}] Subscribed to all {len(subscribed_addrs)} wallets.")
+                    
+                    while True:
+                        # Drain dynamic subscription queue for new user-added wallets
+                        while not DYNAMIC_SUBSCRIPTION_QUEUE.empty():
+                            try:
+                                new_addr = DYNAMIC_SUBSCRIPTION_QUEUE.get_nowait()
+                                if new_addr and new_addr not in subscribed_addrs:
+                                    subscribed_addrs.add(new_addr)
+                                    req = {
+                                        "jsonrpc": "2.0",
+                                        "id": req_id,
+                                        "method": "logsSubscribe",
+                                        "params": [
+                                            {"mentions": [new_addr]},
+                                            {"commitment": "confirmed"}
+                                        ]
+                                    }
+                                    req_id += 1
+                                    await websocket.send(json.dumps(req))
+                                    await websocket.recv()
+                                    logger.info(f"[KOL Worker {worker_id}] Dynamically subscribed to new wallet: {new_addr}")
+                            except asyncio.QueueEmpty:
+                                break
+
                         try:
-                            new_addr = DYNAMIC_SUBSCRIPTION_QUEUE.get_nowait()
-                            if new_addr and new_addr not in subscribed_addrs:
-                                subscribed_addrs.add(new_addr)
-                                req = {
-                                    "jsonrpc": "2.0",
-                                    "id": req_id,
-                                    "method": "logsSubscribe",
-                                    "params": [
-                                        {"mentions": [new_addr]},
-                                        {"commitment": "confirmed"}
-                                    ]
-                                }
-                                req_id += 1
-                                await websocket.send(json.dumps(req))
-                                await websocket.recv()
-                                logger.info(f"[KOL Worker {worker_id}] Dynamically subscribed to new wallet: {new_addr}")
-                        except asyncio.QueueEmpty:
-                            break
+                            msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
 
-                    try:
-                        msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        continue
-
-                    data = json.loads(msg)
-                    if data.get("method") == "logsNotification":
-                        result = data.get("params", {}).get("result", {})
-                        value = result.get("value", {})
-                        if value.get("err") is None:
-                            sig = value.get("signature")
-                            logs = value.get("logs", [])
-                            # Pre-filter logs
-                            if should_process_logs(logs):
-                                asyncio.create_task(process_kol_signature(sig, ALL_TRACKED_WALLETS))
-                            
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning(f"[KOL Worker {worker_id}] Connection closed. Reconnecting in 5 seconds...")
-        except Exception as e:
-            logger.error(f"[KOL Worker {worker_id}] Error: {e}. Reconnecting in 5 seconds...")
-            
-        await asyncio.sleep(5.0)
+                        data = json.loads(msg)
+                        if data.get("method") == "logsNotification":
+                            result = data.get("params", {}).get("result", {})
+                            value = result.get("value", {})
+                            if value.get("err") is None:
+                                sig = value.get("signature")
+                                logs = value.get("logs", [])
+                                # Pre-filter logs
+                                if should_process_logs(logs):
+                                    asyncio.create_task(process_kol_signature(sig, ALL_TRACKED_WALLETS))
+                                    
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning(f"[KOL Worker {worker_id}] Connection closed. Retrying/switching URLs...")
+                break  # break inner loop to try next URI / retry
+            except Exception as e:
+                # Mask key in error logging
+                masked_err = re.sub(r"api-key=[^&]+", "api-key=****", str(e))
+                logger.error(f"[KOL Worker {worker_id}] Connection error using {masked_uri}: {masked_err}")
+                await asyncio.sleep(1.0)
+                
+        if not connected:
+            logger.warning(f"[KOL Worker {worker_id}] All WebSocket connection attempts failed. Retrying in 5 seconds...")
+            await asyncio.sleep(5.0)
 
 async def start_kol_tracker():
     logger.info("Starting Wallet Tracker background task...")
