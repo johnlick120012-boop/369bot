@@ -2349,16 +2349,31 @@ async def start_telegram_mirror():
                 ca = ca_matches[0]
 
             # Extract Links (Twitter/X, Website)
-            urls = re.findall(r'https?://[^\s)]+', text)
+            # 1. From raw text URLs
+            urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text)
+            # Clean trailing punctuation from raw URLs
+            urls = [re.sub(r'[.,)\]?!_*]+$', '', u) for u in urls]
+
+            # 2. From rich text formatting entities
+            from telethon.tl.types import MessageEntityTextUrl
+            if event.message.entities:
+                for entity in event.message.entities:
+                    if isinstance(entity, MessageEntityTextUrl):
+                        clean_url = entity.url.strip()
+                        if clean_url not in urls:
+                            urls.append(clean_url)
+
             x_links = []
             web_links = []
             for url in urls:
                 if "twitter.com" in url.lower() or "x.com" in url.lower():
-                    x_links.append(url)
+                    if url not in x_links:
+                        x_links.append(url)
                 elif "t.me" in url.lower() or "telegram" in url.lower():
                     pass
                 else:
-                    web_links.append(url)
+                    if url not in web_links:
+                        web_links.append(url)
 
             # Build a cleaner description
             clean_desc = text
@@ -2383,6 +2398,43 @@ async def start_telegram_mirror():
                         media_bytes = await event.message.download_media(file=bytes)
                         media_filename = "photo.jpg"
 
+            # Fetch token statistics if CA is found
+            token_stats_value = None
+            if ca:
+                try:
+                    import api_client
+                    pairs = await api_client.get_token_by_ca(ca)
+                    if pairs:
+                        pair = pairs[0]
+                        price_usd = pair.get("priceUsd")
+                        fdv = pair.get("fdv")
+                        liquidity = pair.get("liquidity", {}).get("usd")
+                        volume_24h = pair.get("volume", {}).get("h24")
+                        price_change_24h = pair.get("priceChange", {}).get("h24")
+                        
+                        stats_parts = []
+                        if price_usd is not None:
+                            try:
+                                formatted_price = format_price(price_usd)
+                            except Exception:
+                                val_f = float(price_usd)
+                                formatted_price = f"${val_f:,.6f}" if val_f < 1 else f"${val_f:,.2f}"
+                            stats_parts.append(f"💵 **Price**: {formatted_price}")
+                        if fdv is not None:
+                            stats_parts.append(f"📈 **Market Cap**: ${float(fdv):,.0f}")
+                        if liquidity is not None:
+                            stats_parts.append(f"💧 **Liquidity**: ${float(liquidity):,.0f}")
+                        if volume_24h is not None:
+                            stats_parts.append(f"📊 **24h Volume**: ${float(volume_24h):,.0f}")
+                        if price_change_24h is not None:
+                            change_emoji = "🟢" if float(price_change_24h) >= 0 else "🔴"
+                            stats_parts.append(f"{change_emoji} **24h Change**: {price_change_24h}%")
+                        
+                        if stats_parts:
+                            token_stats_value = "\n".join(stats_parts)
+                except Exception as stats_err:
+                    logger.error(f"Error fetching token stats in mirror: {stats_err}")
+
             # Construct Discord Embed
             embed_title = "📢 Solana CTO Tracker Alert"
             if ticker:
@@ -2395,7 +2447,12 @@ async def start_telegram_mirror():
             )
 
             if ca:
-                embed.add_field(name="🔑 Contract Address", value=f"`{ca}`", inline=False)
+                # Raw CA value (no backticks/quotes) for perfect copy-paste on mobile
+                embed.add_field(name="🔑 Contract Address (Tap to copy)", value=ca, inline=False)
+                
+                if token_stats_value:
+                    embed.add_field(name="📈 Token Statistics", value=token_stats_value, inline=False)
+                
                 analysis_tools = (
                     f"🔗 [Dexscreener](https://dexscreener.com/solana/{ca}) | "
                     f"[RugCheck](https://rugcheck.xyz/tokens/{ca}) | "
