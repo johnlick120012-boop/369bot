@@ -1079,7 +1079,10 @@ async def get_gmgn_token_info(chain: str, address: str) -> Optional[Dict[str, An
     
     res = await fetch_gmgn_json(url, headers)
     if res and res.get("code") == 0:
-        return res.get("data")
+        data = res.get("data")
+        if data and not data.get("address"):
+            return None
+        return data
     return None
 
 
@@ -1110,7 +1113,11 @@ async def get_gmgn_token_security(chain: str, address: str) -> Optional[Dict[str
     
     res = await fetch_gmgn_json(url, headers)
     if res and res.get("code") == 0:
-        return res.get("data")
+        data = res.get("data")
+        # Check if dummy/empty data (all key flag fields are None)
+        if data and data.get("is_honeypot") is None and data.get("is_renounced") is None:
+            return None
+        return data
     return None
 
 
@@ -1145,5 +1152,8 @@ async def get_gmgn_token_holders(chain: str, address: str, limit: int = 100, tag
     
     res = await fetch_gmgn_json(url, headers)
     if res and res.get("code") == 0:
-        return res.get("data")
+        data = res.get("data")
+        if data and not data.get("list"):
+            return None
+        return data
     return None

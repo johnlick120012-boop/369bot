@@ -162,6 +162,21 @@ def format_age(created_at_ms: Any) -> str:
     except Exception:
         return "Unknown"
 
+def get_bubblemaps_url(chain_id: str, address: str) -> Optional[str]:
+    """Generates the URL to visualize the token on Bubblemaps V2."""
+    if not address:
+        return None
+    chain_lower = chain_id.lower()
+    if chain_lower in ("solana", "sol"):
+        return f"https://v2.bubblemaps.io/token/solana/{address}"
+    elif chain_lower in ("ethereum", "eth"):
+        return f"https://v2.bubblemaps.io/token/eth/{address}"
+    elif chain_lower == "base":
+        return f"https://v2.bubblemaps.io/token/base/{address}"
+    elif chain_lower in ("bsc", "binance"):
+        return f"https://v2.bubblemaps.io/token/bsc/{address}"
+    return None
+
 def get_distribution_stats(rug_report: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Extracts sniper, insider, and bundler distribution percentages from a RugCheck report.
     
@@ -752,14 +767,23 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     info = pair.get("info", {})
     image_url = info.get("imageUrl") if info else None
     
+    # Try pump.fun fallback for newly launched coins
+    if not image_url and pump_coin_data:
+        image_url = pump_coin_data.get("image_uri")
+        
+    # Always reserve space for the coin logo by using a placeholder if still empty
+    if not image_url:
+        image_url = "https://i.imgur.com/f94QG4v.png"
+        
+    # Save resolved image URL in pair for the view buttons
+    pair["resolved_image_url"] = image_url
+    
     # Ensure ticker is always visible in the title
     token_name = base_token.get('name', 'Unknown Token')
     embed_title = f"\U0001f680 {token_name} ({ticker})"
     
-    if image_url:
-        lens_link = f" \u2022 [🔍 Google Lens](https://lens.google.com/uploadbyurl?url={image_url})"
-    else:
-        lens_link = f" \u2022 [🔍 Google Search](https://www.google.com/search?q={ticker}+token)"
+    # Add Image Search option for the coin image/sticker
+    lens_link = f" \u2022 [🔍 Image Search](https://lens.google.com/uploadbyurl?url={image_url})"
 
     embed = discord.Embed(
         title=embed_title,
@@ -771,9 +795,8 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
         color=embed_color
     )
     
-    # Image thumbnail if available
-    if image_url:
-        embed.set_thumbnail(url=image_url)
+    # Image thumbnail is always set to ensure space is reserved
+    embed.set_thumbnail(url=image_url)
         
     # Get statistics
     price_usd = pair.get("priceUsd")
@@ -1079,7 +1102,12 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
         
         embed.add_field(name="\U0001f464 Developer Info", value="\n".join(_dev_lines), inline=False)
     
-    embed.add_field(name="\U0001f4dd Contract Address", value=f"`{base_token.get('address')}`", inline=False)
+    ca_val = base_token.get('address', '')
+    bm_url = get_bubblemaps_url(chain_id, ca_val)
+    ca_field_value = f"`{ca_val}`"
+    if bm_url:
+        ca_field_value += f"\n\n[📊 View Bubblemap]({bm_url})"
+    embed.add_field(name="\U0001f4dd Contract Address", value=ca_field_value, inline=False)
     
     # Live timestamp so user knows exactly how fresh the data is
     _now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S UTC")
@@ -1308,13 +1336,16 @@ class TokenInfoView(discord.ui.View):
                     label = soc_type.capitalize()
                     self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=1 if chain_id == "solana" else None))
 
-        # Add Google Lens/Search button
-        image_url = info.get("imageUrl") if info else None
-        ticker = base_token.get('symbol', 'Unknown').upper()
-        if image_url:
-            self.add_item(discord.ui.Button(label="Google Lens", url=f"https://lens.google.com/uploadbyurl?url={image_url}", style=discord.ButtonStyle.link, emoji="🔍", row=1 if chain_id == "solana" else None))
-        else:
-            self.add_item(discord.ui.Button(label="Google Search", url=f"https://www.google.com/search?q={ticker}+token", style=discord.ButtonStyle.link, emoji="🔍", row=1 if chain_id == "solana" else None))
+        # Add Image Search button (uses Google Lens for reverse image search)
+        image_url = self.pair.get("resolved_image_url")
+        if image_url and image_url != "https://i.imgur.com/f94QG4v.png":
+            self.add_item(discord.ui.Button(
+                label="Image Search",
+                url=f"https://lens.google.com/uploadbyurl?url={image_url}",
+                style=discord.ButtonStyle.link,
+                emoji="🔍",
+                row=1 if chain_id == "solana" else None
+            ))
 
 
 class RefreshButton(discord.ui.Button):
@@ -1506,6 +1537,7 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
             amount_str = h.get("amount") or h.get("uiAmount") or ""
             check_address(addr, pct, str(amount_str))
             
+    tracked_total_pct = sum(t["pct"] for t in found_tracked if isinstance(t["pct"], (int, float)))
     http_url, _ = get_solana_rpc_urls()
     insider_report = await insider_analyzer.build_insider_report(
         mint=mint,
@@ -1516,14 +1548,16 @@ async def process_tracked_holders_check(interaction: discord.Interaction, mint: 
         gmgn_security=gmgn_security,
         gmgn_info=gmgn_info,
         gmgn_holders=gmgn_holders,
+        tracked_pct=tracked_total_pct,
     )
     insider_lines = insider_analyzer.format_report_lines(insider_report)
     cluster_lines = insider_analyzer.format_cluster_lines(insider_report)
                 
     # Build embed
+    bm_url = f"https://v2.bubblemaps.io/token/solana/{mint}"
     embed = discord.Embed(
         title=f"🗺️ Bundler & Tracked Holders: ${ticker.upper()}",
-        description=f"**Contract Address:** `{mint}`",
+        description=f"**Contract Address:** `{mint}`\n\n[📊 View Bubblemap]({bm_url})",
         color=0x9945FF
     )
     

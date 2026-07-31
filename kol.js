@@ -1,10 +1,5 @@
 [
-  {
-    "trackedWalletAddress": "FbvUU5qvD9JsU9jp3KDweCpZiVZHLoQBQ1PPCAAbd6FB",
-    "name": "Profiteer",
-    "emoji": "😊",
-    "alertsOn": true
-  },
+  
   {
     "trackedWalletAddress": "2YJbcB9G8wePrpVBcT31o8JEed6L3abgyCjt5qkJMymV",
     "name": "Alan",

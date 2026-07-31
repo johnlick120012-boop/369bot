@@ -172,7 +172,7 @@ def summarize_gmgn(
     gmgn_info: Optional[Dict[str, Any]],
     gmgn_holders: Optional[List[Dict[str, Any]]],
 ) -> Dict[str, Any]:
-    if not gmgn_info:
+    if not gmgn_info or not gmgn_info.get("address"):
         return {
             "top_10_holder_pct": 0.0,
             "dev_pct": 0.0,
@@ -302,6 +302,7 @@ async def build_insider_report(
     gmgn_security: Optional[Dict[str, Any]] = None,
     gmgn_info: Optional[Dict[str, Any]] = None,
     gmgn_holders: Optional[List[Dict[str, Any]]] = None,
+    tracked_pct: float = 0.0,
 ) -> Dict[str, Any]:
     largest_task = asyncio.create_task(fetch_largest_token_accounts(mint, rpc_url))
     rug = summarize_rugcheck(rug_report)
@@ -312,30 +313,35 @@ async def build_insider_report(
 
     if gmgn["source"]:
         clusters = gmgn["clusters"]
-        bundler_pct = gmgn["bundler_pct"]
-        insider_pct = gmgn["insider_pct"]
-        sniper_pct = gmgn["sniper_pct"]
         top_10_holder_pct = gmgn["top_10_holder_pct"]
         primary_source = "GMGN.ai"
     elif st["source"]:
         clusters = st["clusters"]
-        bundler_pct = st["bundler_pct"]
-        insider_pct = rug["insider_pct"]
-        sniper_pct = rug["sniper_pct"]
         top_10_holder_pct = holder_summary["top_10_pct"]
         primary_source = "Solana Tracker"
     else:
         clusters = rug["clusters"]
-        bundler_pct = rug["bundler_pct"]
-        insider_pct = rug["insider_pct"]
-        sniper_pct = rug["sniper_pct"]
         top_10_holder_pct = holder_summary["top_10_pct"]
         primary_source = "RugCheck"
 
+    # Merge/max statistics across all sources to avoid misleading 0.00% reports when one API fails
+    insider_pct = max(gmgn["insider_pct"], rug["insider_pct"], tracked_pct)
+    bundler_pct = max(gmgn["bundler_pct"], st["bundler_pct"], rug["bundler_pct"])
+    sniper_pct = max(gmgn["sniper_pct"] or 0.0, rug["sniper_pct"] or 0.0)
+
+    # If the primary source has no clusters, use clusters from any other source that has them
+    if not clusters:
+        if gmgn["clusters"]:
+            clusters = gmgn["clusters"]
+        elif st["clusters"]:
+            clusters = st["clusters"]
+        else:
+            clusters = rug["clusters"]
+
     risk_level = "LOW"
-    if max(insider_pct, bundler_pct, sniper_pct or 0.0) >= RED_FLAG_SUPPLY_PCT:
+    if max(insider_pct, bundler_pct, sniper_pct) >= RED_FLAG_SUPPLY_PCT:
         risk_level = "HIGH"
-    elif max(insider_pct, bundler_pct, sniper_pct or 0.0, top_10_holder_pct) >= 5.0:
+    elif max(insider_pct, bundler_pct, sniper_pct, top_10_holder_pct) >= 5.0:
         risk_level = "MEDIUM"
 
     return {
@@ -344,7 +350,7 @@ async def build_insider_report(
         "red_flag_threshold_pct": RED_FLAG_SUPPLY_PCT,
         "insider_pct": insider_pct,
         "bundler_pct": bundler_pct,
-        "sniper_pct": sniper_pct,
+        "sniper_pct": sniper_pct if sniper_pct > 0.0 else None,
         "top_10_holder_pct": top_10_holder_pct,
         "clusters": sorted(clusters, key=lambda c: c.get("supply_pct", 0.0), reverse=True),
         "holder_summary": holder_summary,
