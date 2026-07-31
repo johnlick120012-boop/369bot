@@ -168,13 +168,13 @@ def get_bubblemaps_url(chain_id: str, address: str) -> Optional[str]:
         return None
     chain_lower = chain_id.lower()
     if chain_lower in ("solana", "sol"):
-        return f"https://v2.bubblemaps.io/token/solana/{address}"
+        return f"https://app.bubblemaps.io/solana/token/{address}"
     elif chain_lower in ("ethereum", "eth"):
-        return f"https://v2.bubblemaps.io/token/eth/{address}"
+        return f"https://app.bubblemaps.io/eth/token/{address}"
     elif chain_lower == "base":
-        return f"https://v2.bubblemaps.io/token/base/{address}"
+        return f"https://app.bubblemaps.io/base/token/{address}"
     elif chain_lower in ("bsc", "binance"):
-        return f"https://v2.bubblemaps.io/token/bsc/{address}"
+        return f"https://app.bubblemaps.io/bsc/token/{address}"
     return None
 
 def get_distribution_stats(rug_report: Optional[Dict[str, Any]]) -> Dict[str, Any]:
