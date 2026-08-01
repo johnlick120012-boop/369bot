@@ -5,6 +5,12 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Clean up environment variables (strip outer quotes, newlines, and trailing spaces)
+for key, value in list(os.environ.items()):
+    if value:
+        os.environ[key] = value.strip().strip('"').strip("'").strip()
+
+
 # Logger configuration
 logging.basicConfig(
     level=logging.INFO,
