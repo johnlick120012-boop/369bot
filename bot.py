@@ -2262,7 +2262,14 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 async def start_telegram_mirror():
-    """Background task running Telethon to mirror target Telegram channel/group messages to Discord."""
+    """Background task running Telethon to mirror target Telegram channel/group messages to Discord.
+    
+    Includes automatic reconnect with exponential backoff so the mirror self-heals after
+    network drops, session issues, or transient Telegram errors.
+    """
+    import traceback as _tb
+    import io
+
     api_id_str = os.getenv("TELEGRAM_API_ID")
     api_hash = os.getenv("TELEGRAM_API_HASH")
     phone = os.getenv("TELEGRAM_PHONE")
@@ -2270,7 +2277,7 @@ async def start_telegram_mirror():
     source_chat = os.getenv("TELEGRAM_MIRROR_SOURCE_CHAT", "ctotrackersol")
 
     if not api_id_str or not api_hash or not discord_channel_id:
-        logger.warning("Telegram Mirror: Missing credentials (TELEGRAM_API_ID/TELEGRAM_API_HASH) or TELEGRAM_MIRROR_CHANNEL_ID in .env. Skipping startup.")
+        logger.warning("Telegram Mirror: Missing TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_MIRROR_CHANNEL_ID in .env. Skipping.")
         return
 
     try:
@@ -2279,251 +2286,288 @@ async def start_telegram_mirror():
         logger.error(f"Telegram Mirror: TELEGRAM_API_ID must be an integer, got: {api_id_str}")
         return
 
-    # Verify Discord channel at startup
+    discord_channel_id_int = int(discord_channel_id)
+
+    # Verify Discord channel exists once at startup
     try:
-        channel = bot.get_channel(int(discord_channel_id)) or await bot.fetch_channel(int(discord_channel_id))
-        if channel:
-            logger.info(f"Telegram Mirror: Verified Discord destination channel: #{channel.name} (ID: {discord_channel_id})")
+        ch = bot.get_channel(discord_channel_id_int) or await bot.fetch_channel(discord_channel_id_int)
+        if ch:
+            logger.info(f"Telegram Mirror: Discord destination OK → #{ch.name} (ID: {discord_channel_id_int})")
         else:
-            logger.error(f"Telegram Mirror: Discord destination channel ID {discord_channel_id} not found or is inaccessible.")
-    except Exception as chan_err:
-        logger.error(f"Telegram Mirror: Failed to verify Discord channel {discord_channel_id}: {chan_err}")
+            logger.error(f"Telegram Mirror: Discord channel {discord_channel_id_int} not found!")
+    except Exception as e:
+        logger.error(f"Telegram Mirror: Discord channel verify error: {e}")
 
-    logger.info("Initializing Telegram Mirror background client...")
-    # Using 'groq_userbot_session' to reuse active local session credentials automatically
-    client = TelegramClient('groq_userbot_session', api_id, api_hash)
-
-    target_peer_id = None
-
-    @client.on(events.NewMessage())
-    async def mirror_handler(event):
-        nonlocal target_peer_id
+    # ── Reconnect loop — restarts Telethon on any fatal error ──
+    backoff = 5
+    while True:
+        client = None
+        target_peer_id = None
         try:
-            chat_id = event.chat_id
+            logger.info("Telegram Mirror: Creating Telethon client…")
+            client = TelegramClient('groq_userbot_session', api_id, api_hash)
 
-            is_target = False
-            # Check by resolved peer ID first
-            if target_peer_id and chat_id == target_peer_id:
-                is_target = True
-            # Fallback to hardcoded IDs
-            elif str(chat_id) in ("-1002242176791", "2242176791", "-2242176791"):
-                is_target = True
-            else:
-                # Retrieve chat username fallback (requires async API request)
-                chat = await event.get_chat()
-                if chat:
-                    chat_username = getattr(chat, 'username', None)
-                    logger.info(f"Telegram Mirror Check: Incoming message from chat_id={chat_id}, username={chat_username}")
-                    if chat_username and chat_username.lower() == source_chat.lower():
-                        is_target = True
-                        # Update resolved target peer ID for subsequent messages
-                        from telethon import utils
-                        target_peer_id = utils.get_peer_id(chat)
-
-            if not is_target:
-                return
-
-            logger.info(f"Telegram Mirror: Detected message in target channel '{source_chat}' (ID: {chat_id}). Processing...")
-
-            text = event.message.message or ""
-            # Allow messages with only media or text
-            if not text and not event.message.media:
-                return
-
-            # Clean zero-width spaces and other hidden characters
-            clean_text = text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
-
-            # Extract Ticker
-            import re
-            ticker = None
-            ticker_match = re.search(r'\$[A-Za-z0-9_]+', clean_text)
-            if ticker_match:
-                ticker = ticker_match.group(0).upper()
-
-            # Extract Contract Address (using project helper for Solana/EVM)
-            ca = extract_ca(clean_text)
-
-            # Extract Links (Twitter/X, Website)
-            # 1. From raw text URLs
-            urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', clean_text)
-            # Clean trailing punctuation from raw URLs
-            urls = [re.sub(r'[.,)\]?!_*]+$', '', u) for u in urls]
-
-            # 2. From rich text formatting entities
-            from telethon.tl.types import MessageEntityTextUrl
-            if event.message.entities:
-                for entity in event.message.entities:
-                    if isinstance(entity, MessageEntityTextUrl):
-                        clean_url = entity.url.strip()
-                        if clean_url not in urls:
-                            urls.append(clean_url)
-
-            x_links = []
-            web_links = []
-            for url in urls:
-                if "twitter.com" in url.lower() or "x.com" in url.lower():
-                    if url not in x_links:
-                        x_links.append(url)
-                elif "t.me" in url.lower() or "telegram" in url.lower():
-                    pass
-                else:
-                    if url not in web_links:
-                        web_links.append(url)
-
-            # Build a cleaner description
-            clean_desc = clean_text
-            if ca:
-                clean_desc = clean_desc.replace(ca, "")
-            for url in urls:
-                clean_desc = clean_desc.replace(url, "")
-            
-            clean_desc = re.sub(r'\n\s*\n+', '\n\n', clean_desc).strip()
-
-            # Download media if present
-            import io
-            media_bytes = None
-            media_filename = "image.png"
-            if event.message.media:
-                if hasattr(event.message, 'photo') and event.message.photo:
-                    media_bytes = await event.message.download_media(file=bytes)
-                    media_filename = "photo.jpg"
-                elif hasattr(event.message, 'document') and event.message.document:
-                    mime = getattr(event.message.document, 'mime_type', '')
-                    if mime.startswith('image/'):
-                        media_bytes = await event.message.download_media(file=bytes)
-                        media_filename = "photo.jpg"
-
-            # Fetch token statistics if CA is found
-            token_stats_value = None
-            if ca:
+            # ── EVENT HANDLER ────────────────────────────────────────────
+            @client.on(events.NewMessage())
+            async def mirror_handler(event):
+                nonlocal target_peer_id
                 try:
-                    import api_client
-                    pairs = await api_client.get_token_by_ca(ca)
-                    if pairs:
-                        pair = pairs[0]
-                        price_usd = pair.get("priceUsd")
-                        fdv = pair.get("fdv")
-                        liquidity = pair.get("liquidity", {}).get("usd")
-                        volume_24h = pair.get("volume", {}).get("h24")
-                        price_change_24h = pair.get("priceChange", {}).get("h24")
-                        
-                        stats_parts = []
-                        if price_usd is not None:
-                            try:
-                                formatted_price = format_price(price_usd)
-                            except Exception:
-                                val_f = float(price_usd)
-                                formatted_price = f"${val_f:,.6f}" if val_f < 1 else f"${val_f:,.2f}"
-                            stats_parts.append(f"💵 **Price**: {formatted_price}")
-                        if fdv is not None:
-                            stats_parts.append(f"📈 **Market Cap**: ${float(fdv):,.0f}")
-                        if liquidity is not None:
-                            stats_parts.append(f"💧 **Liquidity**: ${float(liquidity):,.0f}")
-                        if volume_24h is not None:
-                            stats_parts.append(f"📊 **24h Volume**: ${float(volume_24h):,.0f}")
-                        if price_change_24h is not None:
-                            change_emoji = "🟢" if float(price_change_24h) >= 0 else "🔴"
-                            stats_parts.append(f"{change_emoji} **24h Change**: {price_change_24h}%")
-                        
-                        if stats_parts:
-                            token_stats_value = "\n".join(stats_parts)
-                except Exception as stats_err:
-                    logger.error(f"Error fetching token stats in mirror: {stats_err}")
+                    chat_id = event.chat_id
 
-            # Construct Discord Embed
-            embed_title = "📢 Solana CTO Tracker Alert"
-            if ticker:
-                embed_title = f"📢 CTO Tracker | {ticker}"
-            
-            embed = discord.Embed(
-                title=embed_title,
-                description=clean_desc if clean_desc else "New update posted.",
-                color=0x9b59b6
-            )
+                    # ── Match target channel ──
+                    is_target = False
+                    if target_peer_id and chat_id == target_peer_id:
+                        is_target = True
+                    elif str(chat_id) in ("-1002242176791", "2242176791", "-2242176791"):
+                        is_target = True
+                        if not target_peer_id:
+                            target_peer_id = chat_id
+                    else:
+                        try:
+                            chat = await event.get_chat()
+                            if chat:
+                                chat_username = getattr(chat, 'username', None)
+                                if chat_username and chat_username.lower() == source_chat.lower():
+                                    is_target = True
+                                    from telethon import utils as _tu
+                                    target_peer_id = _tu.get_peer_id(chat)
+                                    logger.info(f"Telegram Mirror: Resolved target via username → peer_id={target_peer_id}")
+                        except Exception as chat_err:
+                            logger.warning(f"Telegram Mirror: get_chat() failed for {chat_id}: {chat_err}")
 
-            if ca:
-                # Raw CA value (no backticks/quotes) for perfect copy-paste on mobile
-                embed.add_field(name="🔑 Contract Address (Tap to copy)", value=ca, inline=False)
-                
-                if token_stats_value:
-                    embed.add_field(name="📈 Token Statistics", value=token_stats_value, inline=False)
-                
-                analysis_tools = (
-                    f"🔗 [Dexscreener](https://dexscreener.com/solana/{ca}) | "
-                    f"[RugCheck](https://rugcheck.xyz/tokens/{ca}) | "
-                    f"[GMGN](https://gmgn.ai/sol/token/{ca}) | "
-                    f"[Solscan](https://solscan.io/token/{ca})"
-                )
-                embed.add_field(name="📊 Analysis Links", value=analysis_tools, inline=False)
+                    if not is_target:
+                        return
 
-            # Attached Links
-            links_value = []
-            if x_links:
-                links_value.append(f"🐦 [Twitter/X]({x_links[0]})")
-            if web_links:
-                links_value.append(f"🌐 [Website]({web_links[0]})")
-            if links_value:
-                embed.add_field(name="🔗 Attached Links", value=" • ".join(links_value), inline=False)
+                    text = event.message.message or ""
+                    if not text and not event.message.media:
+                        return
 
-            embed.set_footer(text="ctotrackersol mirror • 369bot")
+                    logger.info(f"Telegram Mirror: Processing message from chat {chat_id}, length={len(text)}")
 
-            # Dispatch to configured Discord channel
-            channel = bot.get_channel(int(discord_channel_id)) or await bot.fetch_channel(int(discord_channel_id))
-            if channel:
-                if media_bytes:
-                    file = discord.File(io.BytesIO(media_bytes), filename=media_filename)
-                    embed.set_image(url=f"attachment://{media_filename}")
-                    await channel.send(embed=embed, file=file)
-                else:
-                    await channel.send(embed=embed)
-                logger.info(f"Telegram Mirror: Mirrored message from ctotrackersol as embed to Discord channel {discord_channel_id}.")
-            else:
-                logger.error(f"Telegram Mirror: Could not find or send to Discord channel {discord_channel_id}")
-        except Exception as handler_err:
-            logger.error(f"Error in Telegram mirror event handler: {handler_err}")
+                    # Clean invisible characters
+                    ct = text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '').replace('\u2069', '').replace('\u2066', '')
 
-    try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            logger.error("=" * 80)
-            logger.error("TELEGRAM MIRROR AUTHENTICATION ERROR:")
-            logger.error("Your Telegram session is NOT authorized in the 'discordbot' folder.")
-            logger.error("To fix this and avoid entering a verification code:")
-            logger.error("Copy the file 'groq_userbot_session.session' from the 'telegram bot' folder")
-            logger.error("and paste it directly into this 'discordbot' folder.")
-            logger.error("=" * 80)
-            await client.disconnect()
-            return
+                    # ── Ticker ──
+                    ticker = None
+                    tm = re.search(r'\$([A-Za-z][A-Za-z0-9_]{0,20})', ct)
+                    if tm:
+                        ticker = f"${tm.group(1).upper()}"
 
-        # Fetch dialogs to populate entity cache and ensure updates are received
-        try:
-            logger.info("Telegram Mirror: Fetching dialogs to populate cache...")
-            await client.get_dialogs(limit=50)
-        except Exception as dialogs_err:
-            logger.warning(f"Telegram Mirror: Failed to fetch dialogs at startup: {dialogs_err}")
+                    # ── Contract Address ──
+                    ca = None
+                    # Try EVM first (0x...)
+                    evm_m = re.search(r'\b(0x[a-fA-F0-9]{40})\b', ct)
+                    if evm_m:
+                        ca = evm_m.group(1)
+                    else:
+                        # Solana base58 — filter out common false positives
+                        sol_matches = re.findall(r'(?<![A-Za-z0-9])[1-9A-HJ-NP-Za-km-z]{32,44}(?![A-Za-z0-9])', ct)
+                        for candidate in sol_matches:
+                            # Must contain both letters and digits to be a real address
+                            if any(c.isdigit() for c in candidate) and any(c.isalpha() for c in candidate):
+                                # Skip if it looks like an English word (all lowercase, short)
+                                if len(candidate) < 38 and candidate.isalpha():
+                                    continue
+                                ca = candidate
+                                break
 
-        # Resolve peer ID of the target channel once after connection
-        try:
-            target_entity = await client.get_entity(source_chat)
-            from telethon import utils
-            target_peer_id = utils.get_peer_id(target_entity)
-            logger.info(f"Telegram Mirror: Resolved target source chat '{source_chat}' to peer ID {target_peer_id}")
-            
-            # Ensure userbot is joined to target channel
+                    # ── URLs from text + rich entities ──
+                    urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', ct)
+                    urls = [re.sub(r'[.,)\]?!_*]+$', '', u) for u in urls]
+
+                    try:
+                        from telethon.tl.types import MessageEntityTextUrl
+                        if event.message.entities:
+                            for ent in event.message.entities:
+                                if isinstance(ent, MessageEntityTextUrl):
+                                    u = ent.url.strip()
+                                    if u and u not in urls:
+                                        urls.append(u)
+                    except Exception:
+                        pass
+
+                    x_links = []
+                    web_links = []
+                    for url in urls:
+                        low = url.lower()
+                        if "twitter.com" in low or "x.com" in low:
+                            if url not in x_links:
+                                x_links.append(url)
+                        elif "t.me" in low or "telegram" in low:
+                            pass  # skip Telegram links
+                        else:
+                            if url not in web_links:
+                                web_links.append(url)
+
+                    # ── Clean description ──
+                    clean_desc = ct
+                    if ca:
+                        clean_desc = clean_desc.replace(ca, "")
+                    for url in urls:
+                        clean_desc = clean_desc.replace(url, "")
+                    clean_desc = re.sub(r'\n\s*\n+', '\n\n', clean_desc).strip()
+
+                    # ── Media download ──
+                    media_bytes = None
+                    media_filename = "photo.jpg"
+                    try:
+                        if event.message.media:
+                            if hasattr(event.message, 'photo') and event.message.photo:
+                                media_bytes = await event.message.download_media(file=bytes)
+                            elif hasattr(event.message, 'document') and event.message.document:
+                                mime = getattr(event.message.document, 'mime_type', '') or ''
+                                if mime.startswith('image/'):
+                                    media_bytes = await event.message.download_media(file=bytes)
+                    except Exception as media_err:
+                        logger.warning(f"Telegram Mirror: Media download failed: {media_err}")
+                        media_bytes = None
+
+                    # ── Token stats ──
+                    token_stats_value = None
+                    if ca:
+                        try:
+                            pairs = await api_client.get_token_by_ca(ca)
+                            if pairs:
+                                pair = pairs[0]
+                                price_usd = pair.get("priceUsd")
+                                fdv = pair.get("fdv")
+                                liquidity = pair.get("liquidity", {}).get("usd")
+                                volume_24h = pair.get("volume", {}).get("h24")
+                                price_change_24h = pair.get("priceChange", {}).get("h24")
+
+                                parts = []
+                                if price_usd is not None:
+                                    try:
+                                        fp = format_price(price_usd)
+                                    except Exception:
+                                        v = float(price_usd)
+                                        fp = f"${v:,.6f}" if v < 1 else f"${v:,.2f}"
+                                    parts.append(f"💵 **Price**: {fp}")
+                                if fdv is not None:
+                                    parts.append(f"📈 **MCap**: ${float(fdv):,.0f}")
+                                if liquidity is not None:
+                                    parts.append(f"💧 **Liq**: ${float(liquidity):,.0f}")
+                                if volume_24h is not None:
+                                    parts.append(f"📊 **24h Vol**: ${float(volume_24h):,.0f}")
+                                if price_change_24h is not None:
+                                    ce = "🟢" if float(price_change_24h) >= 0 else "🔴"
+                                    parts.append(f"{ce} **24h**: {price_change_24h}%")
+                                if parts:
+                                    token_stats_value = "\n".join(parts)
+                        except Exception as stats_err:
+                            logger.warning(f"Telegram Mirror: Token stats fetch failed for {ca}: {stats_err}")
+
+                    # ── Build Discord Embed ──
+                    title = f"📢 CTO Tracker | {ticker}" if ticker else "📢 Solana CTO Tracker Alert"
+                    embed = discord.Embed(
+                        title=title,
+                        description=clean_desc[:4000] if clean_desc else "New update posted.",
+                        color=0x9b59b6
+                    )
+
+                    if ca:
+                        embed.add_field(name="🔑 Contract Address (Tap to copy)", value=ca, inline=False)
+                        if token_stats_value:
+                            embed.add_field(name="📈 Token Statistics", value=token_stats_value, inline=False)
+                        embed.add_field(
+                            name="📊 Analysis Hub",
+                            value=(
+                                f"[DexScreener](https://dexscreener.com/solana/{ca}) • "
+                                f"[RugCheck](https://rugcheck.xyz/tokens/{ca}) • "
+                                f"[GMGN](https://gmgn.ai/sol/token/{ca}) • "
+                                f"[Solscan](https://solscan.io/token/{ca}) • "
+                                f"[Bubblemaps](https://app.bubblemaps.io/sol/token/{ca})"
+                            ),
+                            inline=False
+                        )
+
+                    link_parts = []
+                    if x_links:
+                        link_parts.append(f"🐦 [Twitter/X]({x_links[0]})")
+                    if web_links:
+                        link_parts.append(f"🌐 [Website]({web_links[0]})")
+                    if link_parts:
+                        embed.add_field(name="🔗 Links", value=" • ".join(link_parts), inline=False)
+
+                    embed.set_footer(text="ctotrackersol mirror • 369bot")
+
+                    # ── Send to Discord ──
+                    try:
+                        channel = bot.get_channel(discord_channel_id_int)
+                        if not channel:
+                            channel = await bot.fetch_channel(discord_channel_id_int)
+                        if channel:
+                            if media_bytes and isinstance(media_bytes, bytes):
+                                f = discord.File(io.BytesIO(media_bytes), filename=media_filename)
+                                embed.set_image(url=f"attachment://{media_filename}")
+                                await channel.send(embed=embed, file=f)
+                            else:
+                                await channel.send(embed=embed)
+                            logger.info(f"Telegram Mirror: ✅ Mirrored to Discord #{channel.name} | CA={ca or 'N/A'} | Ticker={ticker or 'N/A'}")
+                        else:
+                            logger.error(f"Telegram Mirror: Channel {discord_channel_id_int} not found!")
+                    except Exception as send_err:
+                        logger.error(f"Telegram Mirror: Discord send failed: {send_err}\n{_tb.format_exc()}")
+
+                except Exception as handler_err:
+                    logger.error(f"Telegram Mirror handler error: {handler_err}\n{_tb.format_exc()}")
+
+            # ── CONNECT & RUN ────────────────────────────────────────────
+            logger.info("Telegram Mirror: Connecting to Telegram…")
+            await client.connect()
+
+            if not await client.is_user_authorized():
+                logger.error("=" * 60)
+                logger.error("TELEGRAM MIRROR: SESSION NOT AUTHORIZED!")
+                logger.error("Copy 'groq_userbot_session.session' from the 'telegram bot' folder into this folder.")
+                logger.error("=" * 60)
+                await client.disconnect()
+                return  # Don't retry — needs manual fix
+
+            me = await client.get_me()
+            logger.info(f"Telegram Mirror: Logged in as {me.first_name} (@{me.username or 'N/A'}, ID: {me.id})")
+
+            # Fetch dialogs to populate Telethon's entity cache
             try:
-                from telethon.tl.functions.channels import JoinChannelRequest
-                await client(JoinChannelRequest(target_entity))
-                logger.info(f"Telegram Mirror: Joined target source chat '{source_chat}' successfully")
-            except Exception as join_err:
-                logger.info(f"Telegram Mirror: Join channel check/action: {join_err}")
-                
-        except Exception as resolve_err:
-            logger.warning(f"Telegram Mirror: Could not resolve target source chat '{source_chat}' to entity at startup: {resolve_err}")
+                dialogs = await client.get_dialogs(limit=100)
+                logger.info(f"Telegram Mirror: Fetched {len(dialogs)} dialogs to populate cache")
+            except Exception as d_err:
+                logger.warning(f"Telegram Mirror: get_dialogs failed: {d_err}")
 
-        logger.info("Telegram Mirror: Connected and listening to Telegram updates.")
-        await client.run_until_disconnected()
-    except Exception as start_err:
-        logger.error(f"Failed to run Telegram Mirror client: {start_err}")
+            # Resolve target channel
+            try:
+                entity = await client.get_entity(source_chat)
+                from telethon import utils as _tu
+                target_peer_id = _tu.get_peer_id(entity)
+                logger.info(f"Telegram Mirror: ✅ Resolved '{source_chat}' → peer_id={target_peer_id}")
+
+                # Join channel if not already joined
+                try:
+                    from telethon.tl.functions.channels import JoinChannelRequest
+                    await client(JoinChannelRequest(entity))
+                    logger.info(f"Telegram Mirror: Joined '{source_chat}'")
+                except Exception as j_err:
+                    logger.info(f"Telegram Mirror: Join result: {j_err}")
+            except Exception as r_err:
+                logger.error(f"Telegram Mirror: ❌ Could NOT resolve '{source_chat}': {r_err}\n{_tb.format_exc()}")
+                logger.error("Telegram Mirror: The mirror will still listen using hardcoded IDs as fallback.")
+
+            logger.info("Telegram Mirror: ✅ Connected and listening for updates. Mirror is ACTIVE.")
+            backoff = 5  # Reset backoff on successful connect
+            await client.run_until_disconnected()
+
+        except Exception as fatal_err:
+            logger.error(f"Telegram Mirror: Fatal error (will retry in {backoff}s): {fatal_err}\n{_tb.format_exc()}")
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        logger.warning(f"Telegram Mirror: Disconnected. Reconnecting in {backoff}s…")
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 120)  # Exponential backoff, cap at 2 minutes
 
 
 @bot.event
