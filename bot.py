@@ -2308,11 +2308,11 @@ async def start_telegram_mirror():
             client = TelegramClient('groq_userbot_session', api_id, api_hash)
 
             # ── EVENT HANDLER ────────────────────────────────────────────
-            @client.on(events.NewMessage())
             async def mirror_handler(event):
                 nonlocal target_peer_id
                 try:
                     chat_id = event.chat_id
+                    logger.info(f"Telegram Mirror: [RAW EVENT] chat_id={chat_id} | is_channel={event.is_channel} | has_text={bool(event.message.message)}")
 
                     # ── Match target channel ──
                     is_target = False
@@ -2584,9 +2584,22 @@ async def start_telegram_mirror():
                     logger.info(f"Telegram Mirror: Joined '{source_chat}'")
                 except Exception as j_err:
                     logger.info(f"Telegram Mirror: Join result: {j_err}")
+
+                # Fetch last 5 messages for diagnostics
+                try:
+                    logger.info("Telegram Mirror: Fetching last 5 messages for diagnostics...")
+                    async for msg in client.iter_messages(entity, limit=5):
+                        logger.info(f"Telegram Mirror [Diag]: ID={msg.id} | Date={msg.date} | Text={msg.message[:100] if msg.message else '[No Text]'}")
+                except Exception as d_fetch_err:
+                    logger.error(f"Telegram Mirror: Diag fetch failed: {d_fetch_err}")
+
             except Exception as r_err:
                 logger.error(f"Telegram Mirror: ❌ Could NOT resolve '{source_chat}': {r_err}\n{_tb.format_exc()}")
                 logger.error("Telegram Mirror: The mirror will still listen using hardcoded IDs as fallback.")
+
+            # Register event handler explicitly
+            client.add_event_handler(mirror_handler, events.NewMessage())
+            logger.info("Telegram Mirror: Registered NewMessage event handler")
 
             logger.info("Telegram Mirror: ✅ Connected and listening for updates. Mirror is ACTIVE.")
             backoff = 5  # Reset backoff on successful connect
