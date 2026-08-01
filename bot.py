@@ -3895,8 +3895,11 @@ async def listpremium_slash(interaction: discord.Interaction):
 
 # ----------------- MESSAGE LISTENER (AUTO-DETECT CA) -----------------
 
-def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]] = None) -> discord.Embed:
-    """Creates a highly concise, mobile-optimized Embed from a DexScreener token pair dictionary."""
+def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]] = None,
+                              fresh_info: Optional[Dict[str, Any]] = None,
+                              dex_paid: Optional[Dict[str, Any]] = None,
+                              tracked_holders: Optional[list] = None) -> discord.Embed:
+    """Creates a comprehensive, mobile-friendly embed for auto-detected CAs."""
     base_token = pair.get("baseToken", {})
     chain_id = pair.get("chainId", "")
     ca_address = base_token.get("address", "")
@@ -3906,73 +3909,142 @@ def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     chain_cfg = get_chain_config(chain_id)
     embed_color = chain_cfg.get("color", DEFAULT_COLOR)
 
-    # Get logo/image
+    # Logo
     info = pair.get("info", {})
     image_url = info.get("imageUrl") if info else None
     if not image_url:
         image_url = "https://i.imgur.com/f94QG4v.png"
     pair["resolved_image_url"] = image_url
 
-    # Key statistics
+    # Core stats
     mcap_val = pair.get("marketCap")
-    mcap_formatted = format_large_number(mcap_val)
-    liquidity_val = pair.get("liquidity", {}).get("usd")
-    liquidity_formatted = format_large_number(liquidity_val)
-    volume_24h = pair.get("volume", {}).get("h24")
-    vol_formatted = format_large_number(volume_24h)
+    mcap_fmt = format_large_number(mcap_val)
+    liq_val = pair.get("liquidity", {}).get("usd")
+    liq_fmt = format_large_number(liq_val)
+    vol_24h = pair.get("volume", {}).get("h24")
+    vol_fmt = format_large_number(vol_24h)
+    price_usd = pair.get("priceUsd")
+    try:
+        price_fmt = format_price(price_usd)
+    except Exception:
+        price_fmt = f"${price_usd}" if price_usd else "N/A"
 
-    # Price changes
-    price_changes = pair.get("priceChange", {})
-    change_5m = format_percentage(price_changes.get("m5"))
-    change_1h = format_percentage(price_changes.get("h1"))
+    pc = pair.get("priceChange", {})
+    c5m = format_percentage(pc.get("m5"))
+    c1h = format_percentage(pc.get("h1"))
+    c24h = format_percentage(pc.get("h24"))
 
-    # Distribution Stats (Bundles / Snipers)
-    dist = get_distribution_stats(rug_report) if chain_id == "solana" else {}
-    
-    # Format Bundles / Snipers cleanly
-    bundler_pct = dist.get("bundler_pct")
-    if bundler_pct is None:
-        bundler_str = "N/A"
-    else:
-        clusters = dist.get("bundler_clusters", 0)
-        if clusters > 0:
-            bundler_str = f"{bundler_pct} ({clusters} clusters)"
+    # Estimated 24h fees
+    try:
+        est_fees = float(vol_24h) * 0.01 if vol_24h else 0
+    except Exception:
+        est_fees = 0
+
+    # ── Description ──
+    desc = (
+        f"💵 **Price:** `{price_fmt}`\n"
+        f"💎 **MCap:** `{mcap_fmt}`  •  💧 **Liq:** `{liq_fmt}`\n"
+        f"📊 **24h Vol:** `{vol_fmt}`  •  💰 **Est Fees:** `${est_fees:,.0f}`\n"
+        f"⚡ **5m:** {c5m}  •  **1h:** {c1h}  •  **24h:** {c24h}\n"
+    )
+
+    # ── Threat Alerts ──
+    threats = []
+    try:
+        mc = float(mcap_val) if mcap_val else 0
+        lq = float(liq_val) if liq_val else 0
+        vl = float(vol_24h) if vol_24h else 0
+        txns = pair.get("txns", {}).get("h24", {})
+        total_tx = (txns.get("buys", 0) or 0) + (txns.get("sells", 0) or 0)
+
+        if mc > 50000 and lq > 0 and lq < 3000:
+            threats.append("🚨 Extremely low liquidity vs MCap")
+        elif mc > 10000 and lq > 0 and mc / lq > 15:
+            threats.append(f"🚨 MC/Liq ratio: {mc/lq:.0f}x (very risky)")
+        if vl > 50000 and total_tx < 30:
+            threats.append("🚨 Fake volume (wash trading)")
+        if mc > 150000 and total_tx < 15:
+            threats.append("🚨 Fake MCap (no real activity)")
+    except Exception:
+        pass
+
+    if rug_report and chain_id == "solana":
+        # Dev holdings
+        creator = rug_report.get("creator", "")
+        dev_pct = 0.0
+        for h in rug_report.get("topHolders", []):
+            if h.get("owner") == creator or h.get("address") == creator:
+                dev_pct += h.get("pct", 0.0)
+        if dev_pct > 20:
+            threats.append(f"🚨 Dev holds {dev_pct:.1f}% (rug risk)")
+        elif dev_pct > 5:
+            threats.append(f"⚠️ Dev holds {dev_pct:.1f}%")
+
+        # Top 10 concentration
+        known_accts = rug_report.get("knownAccounts", {})
+        if not isinstance(known_accts, dict):
+            known_accts = {}
+        non_pool = []
+        for h in rug_report.get("topHolders", []):
+            owner = h.get("owner", "")
+            if owner in known_accts:
+                tag = (known_accts[owner].get("type", "") if isinstance(known_accts[owner], dict) else "").lower()
+                if any(k in tag for k in ("dex", "pool", "liquidity", "amm")):
+                    continue
+            non_pool.append(h)
+        top10_pct = sum(h.get("pct", 0.0) for h in non_pool[:10])
+        if top10_pct > 50:
+            threats.append(f"🚨 Top 10 hold {top10_pct:.1f}% (extreme)")
+        elif top10_pct > 21:
+            threats.append(f"⚠️ Top 10 hold {top10_pct:.1f}%")
+
+        # Mint / Freeze
+        mint_auth = rug_report.get("mintAuthority")
+        freeze_auth = rug_report.get("freezeAuthority")
+        if mint_auth is not None:
+            threats.append("🚨 Mint authority active")
+        if freeze_auth is not None:
+            threats.append("🚨 Freeze authority active")
+
+    if threats:
+        desc += "\n" + "\n".join(threats) + "\n"
+
+    # ── DEX Paid ──
+    if dex_paid:
+        if dex_paid.get("has_paid"):
+            types = ", ".join(dex_paid.get("order_types", [])) or "Yes"
+            desc += f"\n✅ **DEX Paid:** {types}\n"
         else:
-            bundler_str = f"{bundler_pct}"
+            desc += "\n❌ **DEX Paid:** No\n"
 
-    sniper_pct = dist.get("sniper_pct")
-    sniper_str = f"{sniper_pct}" if sniper_pct else "N/A"
+    # ── Fresh Wallets ──
+    if fresh_info and fresh_info.get("total_sampled", 0) > 0:
+        fp = fresh_info.get("fresh_pct", 0)
+        fc = fresh_info.get("fresh_count", 0)
+        ft = fresh_info.get("total_sampled", 0)
+        emoji = "🚨" if fp > 50 else ("⚠️" if fp > 25 else "✅")
+        desc += f"{emoji} **Fresh Wallets:** {fc}/{ft} ({fp:.1f}%)\n"
 
-    # Single-field description or compact fields for phone screen compatibility
-    description = (
-        f"💎 **MCap:** `{mcap_formatted}`  \u2022  💧 **Liq:** `{liquidity_formatted}`\n"
-        f"📈 **24h Vol:** `{vol_formatted}`\n"
-        f"⚡ **5m:** {change_5m}  \u2022  **1h:** {change_1h}\n"
-    )
-    
-    if chain_id == "solana":
-        description += (
-            f"📦 **Bundles:** `{bundler_str}`\n"
-            f"🎯 **Snipers:** `{sniper_str}`\n"
-        )
+    # ── Tracked Wallets ──
+    if tracked_holders:
+        th_lines = []
+        for t in tracked_holders[:5]:
+            pct = t.get("pct", 0)
+            pct_str = f"{pct:.2f}%" if isinstance(pct, (int, float)) else "?"
+            th_lines.append(f"{t.get('emoji','👤')} **{t.get('name','?')}** — {pct_str}")
+        desc += "\n🎯 **Tracked Wallets Holding:**\n" + "\n".join(th_lines) + "\n"
 
-    description += (
-        f"\n📝 **CA:** `{ca_address}`\n\n"
-        f"💡 *For full developer wallet track record, fresh wallets count, holder list, and security audits, run the command:* `/ca {ca_address}`"
-    )
+    desc += f"\n📝 **CA:** `{ca_address}`\n"
+    desc += f"💡 *Run `/ca {ca_address}` for full deep-dive analysis*"
 
-    embed = discord.Embed(
-        title=f"🚀 {token_name} ({ticker})",
-        description=description,
-        color=embed_color
-    )
+    embed = discord.Embed(title=f"🚀 {token_name} ({ticker})", description=desc, color=embed_color)
     embed.set_thumbnail(url=image_url)
 
     return embed
 
 
 class BasicTokenInfoView(discord.ui.View):
-    """Stateless link buttons for basic auto-detected token info."""
+    """Stateless link buttons for auto-detected token info."""
     def __init__(self, pair: Dict[str, Any]):
         super().__init__(timeout=None)
         self.pair = pair
@@ -3984,45 +4056,54 @@ class BasicTokenInfoView(discord.ui.View):
         ca_address = base_token.get("address", "")
         pair_address = self.pair.get("pairAddress", "")
         
+        # Row 0 — Trading / Analysis
         if chain_id == "solana":
             self.add_item(discord.ui.Button(label="Axiom", url=f"https://axiom.trade/meme/{pair_address}?chain=sol&pulseChains=sol&trackerChains=sol,robinhood,bnb,eth", style=discord.ButtonStyle.link, emoji="🎯"))
-            self.add_item(discord.ui.Button(label="Padre", url=f"https://trade.padre.gg/token/{ca_address}", style=discord.ButtonStyle.link, emoji="🦅"))
             self.add_item(discord.ui.Button(label="GMGN", url=f"https://gmgn.ai/sol/token/{ca_address}", style=discord.ButtonStyle.link, emoji="🐸"))
-            self.add_item(discord.ui.Button(label="Pump.fun", url=f"https://pump.fun/coin/{ca_address}", style=discord.ButtonStyle.link, emoji="💊"))
+            self.add_item(discord.ui.Button(label="Bubblemaps", url=f"https://app.bubblemaps.io/sol/token/{ca_address}", style=discord.ButtonStyle.link, emoji="🫧"))
+            self.add_item(discord.ui.Button(label="RugCheck", url=f"https://rugcheck.xyz/tokens/{ca_address}", style=discord.ButtonStyle.link, emoji="🛡️"))
         else:
             pair_url = self.pair.get("url")
             if pair_url:
-                self.add_item(discord.ui.Button(label="View on DexScreener", url=pair_url, style=discord.ButtonStyle.link, emoji="📊"))
-                
+                self.add_item(discord.ui.Button(label="DexScreener", url=pair_url, style=discord.ButtonStyle.link, emoji="📊"))
             chain_cfg = get_chain_config(chain_id)
             buy_url = chain_cfg.get("buy_url")
             if buy_url and ca_address:
-                full_buy_url = f"{buy_url}{ca_address}"
-                self.add_item(discord.ui.Button(label=f"Buy on {chain_cfg['name']}", url=full_buy_url, style=discord.ButtonStyle.link, emoji="💳"))
-            
+                self.add_item(discord.ui.Button(label=f"Buy on {chain_cfg['name']}", url=f"{buy_url}{ca_address}", style=discord.ButtonStyle.link, emoji="💳"))
+
+        # Row 1 — Socials / Links
         info = self.pair.get("info", {})
         if info:
+            # Websites
             websites = info.get("websites", [])
-            if websites and len(websites) > 0:
-                self.add_item(discord.ui.Button(label="Website", url=websites[0].get("url"), style=discord.ButtonStyle.link, emoji="🌐", row=1 if chain_id == "solana" else None))
-                
+            for site in websites[:2]:
+                url = site.get("url")
+                label = site.get("label", "Website") or "Website"
+                if url:
+                    self.add_item(discord.ui.Button(label=label, url=url, style=discord.ButtonStyle.link, emoji="🌐", row=1))
+
+            # All socials — X, Instagram, YouTube, Telegram, etc.
+            social_emojis = {
+                "twitter": "🐦", "instagram": "📸", "youtube": "🎬",
+                "telegram": "💬", "discord": "🎮", "reddit": "📡",
+                "tiktok": "🎵", "facebook": "📘", "medium": "📝",
+            }
             socials = info.get("socials", [])
-            for social in socials[:2]:
+            for social in socials[:4]:
                 soc_type = social.get("type", "").lower()
                 soc_url = social.get("url")
                 if soc_url:
-                    emoji = "🐦" if soc_type == "twitter" else ("💬" if soc_type == "telegram" else "🔗")
-                    label = soc_type.capitalize()
-                    self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=1 if chain_id == "solana" else None))
+                    emoji = social_emojis.get(soc_type, "🔗")
+                    label = "X/Twitter" if soc_type == "twitter" else soc_type.capitalize()
+                    self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=1))
 
+        # Row 2 — Image Search
         image_url = self.pair.get("resolved_image_url")
         if image_url and image_url != "https://i.imgur.com/f94QG4v.png":
             self.add_item(discord.ui.Button(
-                label="Image Search",
+                label="Google Lens",
                 url=f"https://lens.google.com/uploadbyurl?url={image_url}",
-                style=discord.ButtonStyle.link,
-                emoji="🔍",
-                row=1 if chain_id == "solana" else None
+                style=discord.ButtonStyle.link, emoji="🔍", row=2
             ))
 
 
@@ -4052,22 +4133,64 @@ async def on_message(message: discord.Message):
         if all_cas:
             # Limit to fetching 2 CAs at a time to prevent spam
             for ca in all_cas[:2]:
-                logger.info(f"Auto-detected contract address: {ca} in message from {message.author} in category 1446685586667732992")
+                logger.info(f"Auto-detected contract address: {ca} in message from {message.author}")
                 try:
                     pairs = await api_client.get_token_by_ca(ca)
                     if pairs:
                         primary_pair = pairs[0]
+                        chain_id = primary_pair.get("chainId", "")
                         rug_report = None
-                        if primary_pair.get("chainId") == "solana":
+                        fresh_info = None
+                        dex_paid_info = None
+                        found_tracked = []
+
+                        if chain_id == "solana":
+                            # Fetch rug report, fresh wallets, dex paid concurrently
+                            http_url, _ = get_solana_rpc_urls()
                             try:
-                                rug_report = await api_client.get_rugcheck_report(ca)
-                            except Exception as ree:
-                                logger.error(f"Error fetching RugCheck report in auto-detect: {ree}")
-                        embed = create_basic_token_embed(primary_pair, rug_report)
+                                results = await asyncio.gather(
+                                    api_client.get_rugcheck_report(ca),
+                                    api_client.get_fresh_wallets_count(ca, http_url),
+                                    api_client.get_dex_paid_orders(chain_id, ca),
+                                    return_exceptions=True
+                                )
+                                rug_report = results[0] if not isinstance(results[0], Exception) else None
+                                fresh_info = results[1] if not isinstance(results[1], Exception) else None
+                                dex_paid_info = results[2] if not isinstance(results[2], Exception) else None
+                            except Exception as fetch_err:
+                                logger.error(f"Auto-detect concurrent fetch error: {fetch_err}")
+
+                            # Check tracked wallets in holders
+                            if rug_report:
+                                try:
+                                    tracked_map = rebuild_all_tracked_wallets() or {}
+                                    for holder in rug_report.get("topHolders", []):
+                                        address = holder.get("owner") or holder.get("address", "")
+                                        if address in tracked_map:
+                                            for w in tracked_map[address]:
+                                                found_tracked.append({
+                                                    "name": w.get("name", "?"),
+                                                    "emoji": w.get("emoji", "👤"),
+                                                    "pct": holder.get("pct", 0),
+                                                })
+                                except Exception as tk_err:
+                                    logger.warning(f"Auto-detect tracked wallet check error: {tk_err}")
+                        else:
+                            # Non-Solana: just fetch dex paid
+                            try:
+                                dex_paid_info = await api_client.get_dex_paid_orders(chain_id, ca)
+                            except Exception:
+                                pass
+
+                        embed = create_basic_token_embed(
+                            primary_pair, rug_report,
+                            fresh_info=fresh_info,
+                            dex_paid=dex_paid_info,
+                            tracked_holders=found_tracked if found_tracked else None
+                        )
                         view = BasicTokenInfoView(primary_pair)
-                        # Reply directly to the message containing the address
                         await message.reply(embed=embed, view=view, mention_author=False)
-                        logger.info(f"Successfully replied with basic info for CA: {ca}")
+                        logger.info(f"Successfully replied with auto-detect info for CA: {ca}")
                 except Exception as e:
                     logger.error(f"Error handling auto-detected CA {ca}: {e}")
                 
