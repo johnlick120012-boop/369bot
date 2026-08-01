@@ -2431,9 +2431,22 @@ async def start_telegram_mirror():
                                 pair = pairs[0]
                                 price_usd = pair.get("priceUsd")
                                 fdv = pair.get("fdv")
-                                liquidity = pair.get("liquidity", {}).get("usd")
+                                chain_id = pair.get("chainId", "")
                                 volume_24h = pair.get("volume", {}).get("h24")
                                 price_change_24h = pair.get("priceChange", {}).get("h24")
+
+                                # Fetch sol price and pump fun data if Solana
+                                sol_price_mirror = None
+                                pump_data_mirror = None
+                                if chain_id == "solana":
+                                    try:
+                                        sol_price_mirror = await fetch_sol_price()
+                                        if pair.get("dexId") == "pumpfun":
+                                            pump_data_mirror = await fetch_pump_coin_data(ca)
+                                    except Exception:
+                                        pass
+
+                                liquidity = pair.get("liquidity", {}).get("usd") if pair.get("liquidity") else None
 
                                 parts = []
                                 if price_usd is not None:
@@ -2445,10 +2458,33 @@ async def start_telegram_mirror():
                                     parts.append(f"💵 **Price**: {fp}")
                                 if fdv is not None:
                                     parts.append(f"📈 **MCap**: ${float(fdv):,.0f}")
+                                
                                 if liquidity is not None:
                                     parts.append(f"💧 **Liq**: ${float(liquidity):,.0f}")
+                                elif pair.get("dexId") == "pumpfun":
+                                    if pump_data_mirror:
+                                        if pump_data_mirror.get("complete"):
+                                            parts.append("💧 **Liq**: 💊 Bonding Curve (100% - Graduated)")
+                                        else:
+                                            _real_sol = pump_data_mirror.get("real_sol_reserves", 0)
+                                            _sv = _real_sol / 1e9 if _real_sol > 1000 else _real_sol
+                                            _prog = min(100.0, (_sv / 85.0) * 100.0)
+                                            parts.append(f"💧 **Liq**: 💊 Bonding Curve ({_prog:.1f}%)")
+                                    else:
+                                        parts.append("💧 **Liq**: 💊 Bonding Curve")
+                                
                                 if volume_24h is not None:
                                     parts.append(f"📊 **24h Vol**: ${float(volume_24h):,.0f}")
+                                    try:
+                                        est_fees_usd = float(volume_24h) * 0.01
+                                        if chain_id == "solana" and sol_price_mirror and sol_price_mirror > 0:
+                                            est_fees_sol = est_fees_usd / sol_price_mirror
+                                            parts.append(f"💰 **Est Fees**: `{est_fees_sol:.2f} SOL` (${est_fees_usd:,.0f})")
+                                        else:
+                                            parts.append(f"💰 **Est Fees**: ${est_fees_usd:,.0f}")
+                                    except Exception:
+                                        pass
+
                                 if price_change_24h is not None:
                                     ce = "🟢" if float(price_change_24h) >= 0 else "🔴"
                                     parts.append(f"{ce} **24h**: {price_change_24h}%")
@@ -3895,10 +3931,36 @@ async def listpremium_slash(interaction: discord.Interaction):
 
 # ----------------- MESSAGE LISTENER (AUTO-DETECT CA) -----------------
 
+async def fetch_sol_price() -> float:
+    """Fetches the current SOL-USD price dynamically from Coinbase API."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.coinbase.com/v2/prices/SOL-USD/spot", timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return float(data["data"]["amount"])
+    except Exception as e:
+        logger.warning(f"Error fetching SOL price for embed calculation: {e}")
+    return 150.0
+
+async def fetch_pump_coin_data(ca_address: str) -> Optional[Dict[str, Any]]:
+    """Fetches the coin metadata and reserves from pump.fun frontend API."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://frontend-api-v3.pump.fun/coins/{ca_address}", headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        logger.warning(f"Error fetching pump.fun coin info for {ca_address}: {e}")
+    return None
+
 def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str, Any]] = None,
                               fresh_info: Optional[Dict[str, Any]] = None,
                               dex_paid: Optional[Dict[str, Any]] = None,
-                              tracked_holders: Optional[list] = None) -> discord.Embed:
+                              tracked_holders: Optional[list] = None,
+                              sol_price: Optional[float] = None,
+                              pump_coin_data: Optional[Dict[str, Any]] = None) -> discord.Embed:
     """Creates a comprehensive, mobile-friendly embed for auto-detected CAs."""
     base_token = pair.get("baseToken", {})
     chain_id = pair.get("chainId", "")
@@ -3909,18 +3971,37 @@ def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     chain_cfg = get_chain_config(chain_id)
     embed_color = chain_cfg.get("color", DEFAULT_COLOR)
 
-    # Logo
-    info = pair.get("info", {})
+    # Logo resolution
+    info = pair.get("info") or {}
     image_url = info.get("imageUrl") if info else None
-    if not image_url:
-        image_url = "https://i.imgur.com/f94QG4v.png"
+    if not image_url and pump_coin_data:
+        image_url = pump_coin_data.get("image_uri")
+    
+    # Do not set placeholder to avoid broken image cards on Discord
     pair["resolved_image_url"] = image_url
 
     # Core stats
     mcap_val = pair.get("marketCap")
     mcap_fmt = format_large_number(mcap_val)
-    liq_val = pair.get("liquidity", {}).get("usd")
-    liq_fmt = format_large_number(liq_val)
+
+    # Liquidity check with pump.fun fallback
+    liq_val = pair.get("liquidity", {}).get("usd") if pair.get("liquidity") else None
+    if liq_val is not None:
+        liq_fmt = format_large_number(liq_val)
+    elif pair.get("dexId") == "pumpfun":
+        if pump_coin_data:
+            if pump_coin_data.get("complete"):
+                liq_fmt = "💊 Bonding Curve (100% - Graduated)"
+            else:
+                _real_sol = pump_coin_data.get("real_sol_reserves", 0)
+                _sv = _real_sol / 1e9 if _real_sol > 1000 else _real_sol
+                _prog = min(100.0, (_sv / 85.0) * 100.0)
+                liq_fmt = f"💊 Bonding Curve ({_prog:.1f}%)"
+        else:
+            liq_fmt = "💊 Bonding Curve"
+    else:
+        liq_fmt = "N/A"
+
     vol_24h = pair.get("volume", {}).get("h24")
     vol_fmt = format_large_number(vol_24h)
     price_usd = pair.get("priceUsd")
@@ -3934,17 +4015,23 @@ def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     c1h = format_percentage(pc.get("h1"))
     c24h = format_percentage(pc.get("h24"))
 
-    # Estimated 24h fees
+    # Estimated 24h fees (1% of volume)
     try:
-        est_fees = float(vol_24h) * 0.01 if vol_24h else 0
+        est_fees_usd = float(vol_24h) * 0.01 if vol_24h else 0
     except Exception:
-        est_fees = 0
+        est_fees_usd = 0
+
+    if chain_id == "solana" and sol_price and sol_price > 0 and est_fees_usd > 0:
+        est_fees_sol = est_fees_usd / sol_price
+        fees_fmt = f"`{est_fees_sol:.2f} SOL` (${est_fees_usd:,.0f})"
+    else:
+        fees_fmt = f"${est_fees_usd:,.0f}"
 
     # ── Description ──
     desc = (
         f"💵 **Price:** `{price_fmt}`\n"
         f"💎 **MCap:** `{mcap_fmt}`  •  💧 **Liq:** `{liq_fmt}`\n"
-        f"📊 **24h Vol:** `{vol_fmt}`  •  💰 **Est Fees:** `${est_fees:,.0f}`\n"
+        f"📊 **24h Vol:** `{vol_fmt}`  •  💰 **Est Fees:** {fees_fmt}\n"
         f"⚡ **5m:** {c5m}  •  **1h:** {c1h}  •  **24h:** {c24h}\n"
     )
 
@@ -4038,7 +4125,8 @@ def create_basic_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     desc += f"💡 *Run `/ca {ca_address}` for full deep-dive analysis*"
 
     embed = discord.Embed(title=f"🚀 {token_name} ({ticker})", description=desc, color=embed_color)
-    embed.set_thumbnail(url=image_url)
+    if image_url:
+        embed.set_thumbnail(url=image_url)
 
     return embed
 
@@ -4144,19 +4232,30 @@ async def on_message(message: discord.Message):
                         dex_paid_info = None
                         found_tracked = []
 
+                        sol_price = None
+                        pump_coin_data = None
+
                         if chain_id == "solana":
-                            # Fetch rug report, fresh wallets, dex paid concurrently
+                            # Fetch rug report, fresh wallets, dex paid, sol price, pump fun data concurrently
                             http_url, _ = get_solana_rpc_urls()
                             try:
-                                results = await asyncio.gather(
+                                is_pump = primary_pair.get("dexId") == "pumpfun"
+                                tasks = [
                                     api_client.get_rugcheck_report(ca),
                                     api_client.get_fresh_wallets_count(ca, http_url),
                                     api_client.get_dex_paid_orders(chain_id, ca),
-                                    return_exceptions=True
-                                )
+                                    fetch_sol_price(),
+                                ]
+                                if is_pump:
+                                    tasks.append(fetch_pump_coin_data(ca))
+                                
+                                results = await asyncio.gather(*tasks, return_exceptions=True)
                                 rug_report = results[0] if not isinstance(results[0], Exception) else None
                                 fresh_info = results[1] if not isinstance(results[1], Exception) else None
                                 dex_paid_info = results[2] if not isinstance(results[2], Exception) else None
+                                sol_price = results[3] if not isinstance(results[3], Exception) else None
+                                if is_pump and len(results) > 4:
+                                    pump_coin_data = results[4] if not isinstance(results[4], Exception) else None
                             except Exception as fetch_err:
                                 logger.error(f"Auto-detect concurrent fetch error: {fetch_err}")
 
@@ -4186,7 +4285,9 @@ async def on_message(message: discord.Message):
                             primary_pair, rug_report,
                             fresh_info=fresh_info,
                             dex_paid=dex_paid_info,
-                            tracked_holders=found_tracked if found_tracked else None
+                            tracked_holders=found_tracked if found_tracked else None,
+                            sol_price=sol_price,
+                            pump_coin_data=pump_coin_data
                         )
                         view = BasicTokenInfoView(primary_pair)
                         await message.reply(embed=embed, view=view, mention_author=False)
