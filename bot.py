@@ -2299,10 +2299,6 @@ async def start_telegram_mirror():
     async def mirror_handler(event):
         nonlocal target_peer_id
         try:
-            # Skip outgoing messages sent by the userbot itself
-            if event.out:
-                return
-
             chat_id = event.chat_id
 
             is_target = False
@@ -2331,26 +2327,22 @@ async def start_telegram_mirror():
             if not text and not event.message.media:
                 return
 
+            # Clean zero-width spaces and other hidden characters
+            clean_text = text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
+
             # Extract Ticker
             import re
             ticker = None
-            ticker_match = re.search(r'\$[A-Za-z0-9_]+', text)
+            ticker_match = re.search(r'\$[A-Za-z0-9_]+', clean_text)
             if ticker_match:
                 ticker = ticker_match.group(0).upper()
 
-            # Extract Solana Contract Address
-            ca = None
-            ca_matches = re.findall(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b', text)
-            for match in ca_matches:
-                if any(c.isdigit() for c in match) and any(c.isalpha() for c in match):
-                    ca = match
-                    break
-            if not ca and ca_matches:
-                ca = ca_matches[0]
+            # Extract Contract Address (using project helper for Solana/EVM)
+            ca = extract_ca(clean_text)
 
             # Extract Links (Twitter/X, Website)
             # 1. From raw text URLs
-            urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text)
+            urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', clean_text)
             # Clean trailing punctuation from raw URLs
             urls = [re.sub(r'[.,)\]?!_*]+$', '', u) for u in urls]
 
@@ -2376,7 +2368,7 @@ async def start_telegram_mirror():
                         web_links.append(url)
 
             # Build a cleaner description
-            clean_desc = text
+            clean_desc = clean_text
             if ca:
                 clean_desc = clean_desc.replace(ca, "")
             for url in urls:
@@ -2500,12 +2492,28 @@ async def start_telegram_mirror():
             await client.disconnect()
             return
 
+        # Fetch dialogs to populate entity cache and ensure updates are received
+        try:
+            logger.info("Telegram Mirror: Fetching dialogs to populate cache...")
+            await client.get_dialogs(limit=50)
+        except Exception as dialogs_err:
+            logger.warning(f"Telegram Mirror: Failed to fetch dialogs at startup: {dialogs_err}")
+
         # Resolve peer ID of the target channel once after connection
         try:
             target_entity = await client.get_entity(source_chat)
             from telethon import utils
             target_peer_id = utils.get_peer_id(target_entity)
             logger.info(f"Telegram Mirror: Resolved target source chat '{source_chat}' to peer ID {target_peer_id}")
+            
+            # Ensure userbot is joined to target channel
+            try:
+                from telethon.tl.functions.channels import JoinChannelRequest
+                await client(JoinChannelRequest(target_entity))
+                logger.info(f"Telegram Mirror: Joined target source chat '{source_chat}' successfully")
+            except Exception as join_err:
+                logger.info(f"Telegram Mirror: Join channel check/action: {join_err}")
+                
         except Exception as resolve_err:
             logger.warning(f"Telegram Mirror: Could not resolve target source chat '{source_chat}' to entity at startup: {resolve_err}")
 
