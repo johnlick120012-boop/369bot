@@ -2305,7 +2305,14 @@ async def start_telegram_mirror():
         target_peer_id = None
         try:
             logger.info("Telegram Mirror: Creating Telethon client…")
-            client = TelegramClient('groq_userbot_session', api_id, api_hash)
+            from telethon.sessions import StringSession
+            session_str = os.getenv("TELEGRAM_SESSION_STRING")
+            if session_str:
+                logger.info("Telegram Mirror: Using TELEGRAM_SESSION_STRING from environment variables.")
+                client = TelegramClient(StringSession(session_str), api_id, api_hash)
+            else:
+                logger.info("Telegram Mirror: Using local 'groq_userbot_session' file.")
+                client = TelegramClient('groq_userbot_session', api_id, api_hash)
 
             # ── EVENT HANDLER ────────────────────────────────────────────
             async def mirror_handler(event):
@@ -2555,7 +2562,8 @@ async def start_telegram_mirror():
             if not await client.is_user_authorized():
                 logger.error("=" * 60)
                 logger.error("TELEGRAM MIRROR: SESSION NOT AUTHORIZED!")
-                logger.error("Copy 'groq_userbot_session.session' from the 'telegram bot' folder into this folder.")
+                logger.error("Please configure the TELEGRAM_SESSION_STRING environment variable in your deployment.")
+                logger.error("Or copy 'groq_userbot_session.session' if running locally.")
                 logger.error("=" * 60)
                 await client.disconnect()
                 return  # Don't retry — needs manual fix
