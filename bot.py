@@ -2313,6 +2313,7 @@ async def start_telegram_mirror():
                 chat = await event.get_chat()
                 if chat:
                     chat_username = getattr(chat, 'username', None)
+                    logger.info(f"Telegram Mirror Check: Incoming message from chat_id={chat_id}, username={chat_username}")
                     if chat_username and chat_username.lower() == source_chat.lower():
                         is_target = True
                         # Update resolved target peer ID for subsequent messages
@@ -2321,6 +2322,8 @@ async def start_telegram_mirror():
 
             if not is_target:
                 return
+
+            logger.info(f"Telegram Mirror: Detected message in target channel '{source_chat}' (ID: {chat_id}). Processing...")
 
             text = event.message.message or ""
             # Allow messages with only media or text
