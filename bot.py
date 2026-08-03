@@ -4845,24 +4845,36 @@ async def process_kol_signature(sig: str, tracked_wallets: dict):
         
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(rpc_url, json=payload, timeout=10) as response:
-                    if response.status != 200:
-                        logger.warning(f"RPC HTTP error fetching {sig}: {response.status}")
-                        return
-                    tx_data = await response.json()
+                async def post_payload():
+                    backoff = 1.0
+                    for attempt in range(3):
+                        async with session.post(rpc_url, json=payload, timeout=10) as response:
+                            if response.status == 429:
+                                logger.warning(f"RPC HTTP 429 (rate limit) fetching {sig}. Retrying in {backoff:.1f}s...")
+                                await asyncio.sleep(backoff)
+                                backoff *= 2
+                                continue
+                            if response.status != 200:
+                                logger.warning(f"RPC HTTP error fetching {sig}: {response.status}")
+                                return None
+                            return await response.json()
+                    return None
+
+                tx_data = await post_payload()
+                if not tx_data:
+                    return
                     
-                    result = tx_data.get("result")
-                    if not result:
-                        # Retry once after 1.5 seconds due to node replication delay
-                        await asyncio.sleep(1.5)
-                        async with session.post(rpc_url, json=payload, timeout=10) as retry_response:
-                            if retry_response.status == 200:
-                                tx_data = await retry_response.json()
-                                result = tx_data.get("result")
-                                
-                    if not result:
-                        logger.warning(f"No transaction details returned for {sig} after retry (might be slot expiration or pruning)")
-                        return
+                result = tx_data.get("result")
+                if not result:
+                    # Retry once after 1.5 seconds due to node replication delay
+                    await asyncio.sleep(1.5)
+                    tx_data = await post_payload()
+                    if tx_data:
+                        result = tx_data.get("result")
+                        
+                if not result:
+                    logger.warning(f"No transaction details returned for {sig} after retry (might be slot expiration or pruning)")
+                    return
                         
                     meta = result.get("meta", {})
                     if not meta or meta.get("err"):
