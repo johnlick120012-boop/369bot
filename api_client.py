@@ -1063,11 +1063,18 @@ async def fetch_gmgn_json(url: str, headers: Dict[str, str], max_retries: int = 
     return None
 
 
+def get_clean_gmgn_api_key() -> Optional[str]:
+    api_key = os.getenv("GMGN_API_KEY")
+    if api_key:
+        return api_key.strip().replace('"', '').replace("'", "")
+    return None
+
+
 async def get_gmgn_token_info(chain: str, address: str) -> Optional[Dict[str, Any]]:
     """
     Fetches token general info and stats from GMGN OpenAPI.
     """
-    api_key = os.getenv("GMGN_API_KEY")
+    api_key = get_clean_gmgn_api_key()
     if not api_key:
         logger.warning("GMGN_API_KEY not configured in env.")
         return None
@@ -1101,7 +1108,7 @@ async def get_gmgn_token_security(chain: str, address: str) -> Optional[Dict[str
     """
     Fetches token security details (mint/freeze authority, lock status, honeypot) from GMGN OpenAPI.
     """
-    api_key = os.getenv("GMGN_API_KEY")
+    api_key = get_clean_gmgn_api_key()
     if not api_key:
         logger.warning("GMGN_API_KEY not configured in env.")
         return None
@@ -1137,7 +1144,7 @@ async def get_gmgn_token_holders(chain: str, address: str, limit: int = 100, tag
     Fetches top token holders (with tags and percentages) from GMGN OpenAPI.
     Optional tag filters: smart_degen, renowned, fresh_wallet, dev, sniper, rat_trader, bundler, transfer_in, dex_bot, bluechip_owner
     """
-    api_key = os.getenv("GMGN_API_KEY")
+    api_key = get_clean_gmgn_api_key()
     if not api_key:
         logger.warning("GMGN_API_KEY not configured in env.")
         return None
