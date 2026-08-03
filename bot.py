@@ -1295,11 +1295,11 @@ class TokenInfoView(discord.ui.View):
                     twitter_url = social.get("url")
                     break
         if twitter_url:
-            self.add_item(CheckXProfileButton(twitter_url, row=2 if chain_id == "solana" else 1))
+            self.add_item(CheckXProfileButton(twitter_url, row=3 if chain_id == "solana" else 1))
             
         # Add Upgrade Button if user is not premium
         if user_id and not premium_db.is_premium(str(user_id)):
-            self.add_item(UpgradeButton(row=2 if chain_id == "solana" else 1))
+            self.add_item(UpgradeButton(row=3 if chain_id == "solana" else 1))
         
     def add_action_buttons(self):
         chain_id = self.pair.get("chainId", "")
@@ -1332,7 +1332,7 @@ class TokenInfoView(discord.ui.View):
             # Add Website
             websites = info.get("websites", [])
             if websites and len(websites) > 0:
-                self.add_item(discord.ui.Button(label="Website", url=websites[0].get("url"), style=discord.ButtonStyle.link, emoji="🌐", row=1 if chain_id == "solana" else None))
+                self.add_item(discord.ui.Button(label="Website", url=websites[0].get("url"), style=discord.ButtonStyle.link, emoji="🌐", row=2 if chain_id == "solana" else None))
                 
             # Add Socials (Twitter, Telegram)
             socials = info.get("socials", [])
@@ -1342,7 +1342,7 @@ class TokenInfoView(discord.ui.View):
                 if soc_url:
                     emoji = "🐦" if soc_type == "twitter" else ("💬" if soc_type == "telegram" else "🔗")
                     label = soc_type.capitalize()
-                    self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=1 if chain_id == "solana" else None))
+                    self.add_item(discord.ui.Button(label=label, url=soc_url, style=discord.ButtonStyle.link, emoji=emoji, row=2 if chain_id == "solana" else None))
 
         # Add Image Search button (uses Google Lens for reverse image search)
         image_url = self.pair.get("resolved_image_url")
@@ -1352,7 +1352,7 @@ class TokenInfoView(discord.ui.View):
                 url=f"https://lens.google.com/uploadbyurl?url={image_url}",
                 style=discord.ButtonStyle.link,
                 emoji="🔍",
-                row=1 if chain_id == "solana" else None
+                row=2 if chain_id == "solana" else None
             ))
 
 
