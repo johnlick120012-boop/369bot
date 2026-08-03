@@ -55,17 +55,17 @@ def get_solana_wss_urls() -> List[str]:
     """Returns a list of WebSocket URLs to try, in order of priority."""
     key1 = (os.getenv("HELIUS_API_KEY") or "").strip()
     key2 = (os.getenv("HELIUS_API_KEY_2") or "").strip()
+    fallback = (os.getenv("SOLANA_RPC_WSS") or "").strip()
     
     urls = []
+    if fallback:
+        urls.append(fallback)
     if key1:
         urls.append(f"wss://mainnet.helius-rpc.com/?api-key={key1}")
     if key2:
         urls.append(f"wss://mainnet.helius-rpc.com/?api-key={key2}")
     
-    fallback = os.getenv("SOLANA_RPC_WSS")
-    if fallback:
-        urls.append(fallback)
-    else:
+    if not fallback:
         urls.append("wss://api.mainnet-beta.solana.com")
         
     return urls
