@@ -4876,196 +4876,196 @@ async def process_kol_signature(sig: str, tracked_wallets: dict):
                     logger.warning(f"No transaction details returned for {sig} after retry (might be slot expiration or pruning)")
                     return
                         
-                    meta = result.get("meta", {})
-                    if not meta or meta.get("err"):
-                        logger.debug(f"Transaction {sig} failed or has no metadata. Skipping.")
-                        return
-                        
-                    transaction = result.get("transaction", {})
-                    account_keys = transaction.get("message", {}).get("accountKeys", [])
+                meta = result.get("meta", {})
+                if not meta or meta.get("err"):
+                    logger.debug(f"Transaction {sig} failed or has no metadata. Skipping.")
+                    return
                     
-                    signer_pubkey = None
-                    signer_idx = -1
-                    for idx, acc in enumerate(account_keys):
-                        pubkey = acc.get("pubkey") if isinstance(acc, dict) else acc
-                        is_signer = acc.get("signer") if isinstance(acc, dict) else (idx == 0)
-                        if is_signer:
-                            signer_pubkey = pubkey
-                            signer_idx = idx
-                            break
-                            
-                    if signer_idx == -1:
-                        return
+                transaction = result.get("transaction", {})
+                account_keys = transaction.get("message", {}).get("accountKeys", [])
+                
+                signer_pubkey = None
+                signer_idx = -1
+                for idx, acc in enumerate(account_keys):
+                    pubkey = acc.get("pubkey") if isinstance(acc, dict) else acc
+                    is_signer = acc.get("signer") if isinstance(acc, dict) else (idx == 0)
+                    if is_signer:
+                        signer_pubkey = pubkey
+                        signer_idx = idx
+                        break
                         
-                    pre_balances = {}
-                    for b in meta.get("preTokenBalances", []):
-                        owner = b.get("owner")
-                        mint = b.get("mint")
-                        ui_amount = b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
-                        if owner and mint:
-                            pre_balances[(owner, mint)] = ui_amount
-                            
-                    for b in meta.get("postTokenBalances", []):
-                        owner = b.get("owner")
-                        mint = b.get("mint")
-                        post_amount = b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
+                if signer_idx == -1:
+                    return
+                    
+                pre_balances = {}
+                for b in meta.get("preTokenBalances", []):
+                    owner = b.get("owner")
+                    mint = b.get("mint")
+                    ui_amount = b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
+                    if owner and mint:
+                        pre_balances[(owner, mint)] = ui_amount
                         
-                        if owner and mint and owner in ALL_TRACKED_WALLETS:
-                            if mint == "So11111111111111111111111111111111111111112":
+                for b in meta.get("postTokenBalances", []):
+                    owner = b.get("owner")
+                    mint = b.get("mint")
+                    post_amount = b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
+                    
+                    if owner and mint and owner in ALL_TRACKED_WALLETS:
+                        if mint == "So11111111111111111111111111111111111111112":
+                            continue
+                            
+                        pre_amount = pre_balances.get((owner, mint), 0)
+                        if post_amount > pre_amount:
+                            amount_bought = post_amount - pre_amount
+                            
+                            pre_sol = meta.get("preBalances", [])[signer_idx]
+                            post_sol = meta.get("postBalances", [])[signer_idx]
+                            sol_spent = (pre_sol - post_sol) / 1e9
+                            
+                            fee = meta.get("fee", 0) / 1e9
+                            sol_spent = max(0.0, sol_spent - fee)
+                            
+                            targets = ALL_TRACKED_WALLETS[owner]
+                            first_name = targets[0].get("name") or f"Wallet ({owner[:4]}...{owner[-4:]})"
+                            
+                            if sol_spent < 0.005:
+                                logger.debug(f"Skipped transfer/airdrop: {first_name} received {amount_bought:.2f} of {mint} (spent: {sol_spent:.5f} SOL)")
                                 continue
                                 
-                            pre_amount = pre_balances.get((owner, mint), 0)
-                            if post_amount > pre_amount:
-                                amount_bought = post_amount - pre_amount
+                            logger.info(f"Wallet Buy Detected! {first_name} bought {amount_bought:.2f} of {mint} for {sol_spent:.4f} SOL")
+                            
+                            # Use cached token details if available
+                            now = time.time()
+                            cached = TOKEN_CACHE.get(mint)
+                            if cached and (now - cached.get("timestamp", 0) < TOKEN_CACHE_TTL):
+                                ticker = cached["ticker"]
+                                market_cap_str = cached["market_cap"]
+                                liquidity_str = cached["liquidity"]
+                                bonding_progress = cached["bonding_progress"]
+                                insiders_pct = cached["insiders_pct"]
+                                dev_holdings_pct = cached["dev_holdings_pct"]
+                                is_pump = cached["is_pump"]
+                                token_name = cached.get("name") or ticker or "Unknown Token"
+                                pair_address = cached.get("pair_address") or mint
+                                logger.debug(f"Using cached metadata for token {mint}: {ticker}")
+                            else:
+                                ticker = None
+                                token_name = "Unknown Token"
+                                pair_address = mint
+                                market_cap_str = "N/A"
+                                liquidity_str = "N/A"
+                                bonding_progress = None
+                                insiders_pct = None
+                                dev_holdings_pct = None
+                                is_pump = mint.endswith("pump")
                                 
-                                pre_sol = meta.get("preBalances", [])[signer_idx]
-                                post_sol = meta.get("postBalances", [])[signer_idx]
-                                sol_spent = (pre_sol - post_sol) / 1e9
+                                # Try pump.fun API FIRST for pump tokens — it's always faster and more reliable
+                                if is_pump:
+                                    try:
+                                        pump_url = f"https://frontend-api-v3.pump.fun/coins/{mint}"
+                                        pump_headers = {
+                                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                                        }
+                                        async with session.get(pump_url, headers=pump_headers, timeout=5) as resp:
+                                            if resp.status == 200:
+                                                coin_data = await resp.json()
+                                                if coin_data:
+                                                    ticker = coin_data.get("symbol") or coin_data.get("name")
+                                                    token_name = coin_data.get("name") or ticker
+                                                    
+                                                    usd_mc = coin_data.get("usd_market_cap")
+                                                    if usd_mc:
+                                                        market_cap_str = format_large_number(usd_mc)
+                                                    
+                                                    complete = coin_data.get("complete", False)
+                                                    if complete:
+                                                        bonding_progress = 100.0
+                                                    else:
+                                                        real_sol = coin_data.get("real_sol_reserves", 0)
+                                                        sol_val = real_sol / 1e9 if real_sol > 1000 else real_sol
+                                                        bonding_progress = min(100.0, (sol_val / 85.0) * 100.0)
+                                    except Exception as e:
+                                        logger.error(f"Error fetching pump.fun data for {mint}: {e}")
                                 
-                                fee = meta.get("fee", 0) / 1e9
-                                sol_spent = max(0.0, sol_spent - fee)
+                                # Fallback to DexScreener if pump.fun didn't give us data
+                                if not ticker:
+                                    try:
+                                        pairs = await api_client.get_token_by_ca(mint)
+                                        if pairs:
+                                            primary_pair = pairs[0]
+                                            base_token = primary_pair.get("baseToken", {})
+                                            ticker = base_token.get("symbol")
+                                            token_name = base_token.get("name") or ticker
+                                            pair_address = primary_pair.get("pairAddress", mint)
+                                            
+                                            mcap = primary_pair.get("marketCap")
+                                            if mcap:
+                                                market_cap_str = format_large_number(mcap)
+                                                
+                                            liq = primary_pair.get("liquidity", {}).get("usd")
+                                            if liq is not None:
+                                                liquidity_str = format_large_number(liq)
+                                                
+                                            if not is_pump:
+                                                is_pump = primary_pair.get("dexId") == "pumpfun"
+                                    except Exception as e:
+                                        logger.error(f"Error fetching DexScreener info for KOL alert: {e}")
                                 
-                                targets = ALL_TRACKED_WALLETS[owner]
-                                first_name = targets[0].get("name") or f"Wallet ({owner[:4]}...{owner[-4:]})"
-                                
-                                if sol_spent < 0.005:
-                                    logger.debug(f"Skipped transfer/airdrop: {first_name} received {amount_bought:.2f} of {mint} (spent: {sol_spent:.5f} SOL)")
+                                # If we STILL don't have a ticker, skip this alert entirely
+                                if not ticker:
+                                    logger.warning(f"Skipping alert for {mint}: could not resolve token ticker from any source")
                                     continue
                                     
-                                logger.info(f"Wallet Buy Detected! {first_name} bought {amount_bought:.2f} of {mint} for {sol_spent:.4f} SOL")
+                                # Cache metadata
+                                TOKEN_CACHE[mint] = {
+                                    "ticker": ticker,
+                                    "name": token_name,
+                                    "pair_address": pair_address,
+                                    "market_cap": market_cap_str,
+                                    "liquidity": liquidity_str,
+                                    "bonding_progress": bonding_progress,
+                                    "insiders_pct": insiders_pct,
+                                    "dev_holdings_pct": dev_holdings_pct,
+                                    "is_pump": is_pump,
+                                    "timestamp": now
+                                }
                                 
-                                # Use cached token details if available
-                                now = time.time()
-                                cached = TOKEN_CACHE.get(mint)
-                                if cached and (now - cached.get("timestamp", 0) < TOKEN_CACHE_TTL):
-                                    ticker = cached["ticker"]
-                                    market_cap_str = cached["market_cap"]
-                                    liquidity_str = cached["liquidity"]
-                                    bonding_progress = cached["bonding_progress"]
-                                    insiders_pct = cached["insiders_pct"]
-                                    dev_holdings_pct = cached["dev_holdings_pct"]
-                                    is_pump = cached["is_pump"]
-                                    token_name = cached.get("name") or ticker or "Unknown Token"
-                                    pair_address = cached.get("pair_address") or mint
-                                    logger.debug(f"Using cached metadata for token {mint}: {ticker}")
-                                else:
-                                    ticker = None
-                                    token_name = "Unknown Token"
-                                    pair_address = mint
-                                    market_cap_str = "N/A"
-                                    liquidity_str = "N/A"
-                                    bonding_progress = None
-                                    insiders_pct = None
-                                    dev_holdings_pct = None
-                                    is_pump = mint.endswith("pump")
-                                    
-                                    # Try pump.fun API FIRST for pump tokens — it's always faster and more reliable
-                                    if is_pump:
-                                        try:
-                                            pump_url = f"https://frontend-api-v3.pump.fun/coins/{mint}"
-                                            pump_headers = {
-                                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                                            }
-                                            async with session.get(pump_url, headers=pump_headers, timeout=5) as resp:
-                                                if resp.status == 200:
-                                                    coin_data = await resp.json()
-                                                    if coin_data:
-                                                        ticker = coin_data.get("symbol") or coin_data.get("name")
-                                                        token_name = coin_data.get("name") or ticker
-                                                        
-                                                        usd_mc = coin_data.get("usd_market_cap")
-                                                        if usd_mc:
-                                                            market_cap_str = format_large_number(usd_mc)
-                                                        
-                                                        complete = coin_data.get("complete", False)
-                                                        if complete:
-                                                            bonding_progress = 100.0
-                                                        else:
-                                                            real_sol = coin_data.get("real_sol_reserves", 0)
-                                                            sol_val = real_sol / 1e9 if real_sol > 1000 else real_sol
-                                                            bonding_progress = min(100.0, (sol_val / 85.0) * 100.0)
-                                        except Exception as e:
-                                            logger.error(f"Error fetching pump.fun data for {mint}: {e}")
-                                    
-                                    # Fallback to DexScreener if pump.fun didn't give us data
-                                    if not ticker:
-                                        try:
-                                            pairs = await api_client.get_token_by_ca(mint)
-                                            if pairs:
-                                                primary_pair = pairs[0]
-                                                base_token = primary_pair.get("baseToken", {})
-                                                ticker = base_token.get("symbol")
-                                                token_name = base_token.get("name") or ticker
-                                                pair_address = primary_pair.get("pairAddress", mint)
-                                                
-                                                mcap = primary_pair.get("marketCap")
-                                                if mcap:
-                                                    market_cap_str = format_large_number(mcap)
-                                                    
-                                                liq = primary_pair.get("liquidity", {}).get("usd")
-                                                if liq is not None:
-                                                    liquidity_str = format_large_number(liq)
-                                                    
-                                                if not is_pump:
-                                                    is_pump = primary_pair.get("dexId") == "pumpfun"
-                                        except Exception as e:
-                                            logger.error(f"Error fetching DexScreener info for KOL alert: {e}")
-                                    
-                                    # If we STILL don't have a ticker, skip this alert entirely
-                                    if not ticker:
-                                        logger.warning(f"Skipping alert for {mint}: could not resolve token ticker from any source")
-                                        continue
-                                        
-                                    # Cache metadata
-                                    TOKEN_CACHE[mint] = {
-                                        "ticker": ticker,
-                                        "name": token_name,
-                                        "pair_address": pair_address,
-                                        "market_cap": market_cap_str,
-                                        "liquidity": liquidity_str,
-                                        "bonding_progress": bonding_progress,
-                                        "insiders_pct": insiders_pct,
-                                        "dev_holdings_pct": dev_holdings_pct,
-                                        "is_pump": is_pump,
-                                        "timestamp": now
-                                    }
-                                    
-                                # Dispatch alerts to all targets registered for this wallet
-                                for target in targets:
-                                    t_type = target.get("type")
-                                    t_name = target.get("name") or "Wallet"
-                                    t_emoji = target.get("emoji") or "👤"
-                                    
-                                    if t_type == "kol":
-                                        await queue_kol_alert(
+                            # Dispatch alerts to all targets registered for this wallet
+                            for target in targets:
+                                t_type = target.get("type")
+                                t_name = target.get("name") or "Wallet"
+                                t_emoji = target.get("emoji") or "👤"
+                                
+                                if t_type == "kol":
+                                    await queue_kol_alert(
+                                        t_emoji,
+                                        t_name,
+                                        owner,
+                                        ticker,
+                                        mint,
+                                        sol_spent,
+                                        market_cap_str,
+                                        liquidity_str,
+                                        bonding_progress,
+                                        insiders_pct,
+                                        dev_holdings_pct,
+                                        is_pump
+                                    )
+                                elif t_type == "user":
+                                    u_id = target.get("user_id")
+                                    t_id = target.get("thread_id")
+                                    if u_id and t_id:
+                                        await queue_user_alert(
+                                            u_id,
+                                            t_id,
                                             t_emoji,
                                             t_name,
                                             owner,
                                             ticker,
                                             mint,
                                             sol_spent,
-                                            market_cap_str,
-                                            liquidity_str,
-                                            bonding_progress,
-                                            insiders_pct,
-                                            dev_holdings_pct,
-                                            is_pump
+                                            market_cap_str
                                         )
-                                    elif t_type == "user":
-                                        u_id = target.get("user_id")
-                                        t_id = target.get("thread_id")
-                                        if u_id and t_id:
-                                            await queue_user_alert(
-                                                u_id,
-                                                t_id,
-                                                t_emoji,
-                                                t_name,
-                                                owner,
-                                                ticker,
-                                                mint,
-                                                sol_spent,
-                                                market_cap_str
-                                            )
                                 
         except Exception as e:
             logger.error(f"Error processing KOL transaction signature {sig}: {e}")
