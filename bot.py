@@ -5062,6 +5062,7 @@ async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
     logger.info(f"[KOL Worker {worker_id}] Starting for {len(wallets_chunk)} wallets...")
     subscribed_addrs = set(wallets_chunk)
     
+    reconnect_delay = 5.0
     while True:
         uris = get_solana_wss_urls()
         connected = False
@@ -5069,6 +5070,13 @@ async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
         for uri in uris:
             masked_uri = re.sub(r"api-key=[^&]+", "api-key=****", uri)
             try:
+                # Apply reconnect delay if needed
+                if reconnect_delay > 5.0:
+                    logger.info(f"[KOL Worker {worker_id}] Throttling reconnection. Waiting {reconnect_delay:.1f} seconds...")
+                    await asyncio.sleep(reconnect_delay)
+
+                connect_start_time = asyncio.get_event_loop().time()
+                
                 logger.info(f"[KOL Worker {worker_id}] Connecting to {masked_uri}...")
                 async with websockets.connect(uri) as websocket:
                     connected = True
@@ -5088,8 +5096,15 @@ async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
                         req_id += 1
                         await websocket.send(json.dumps(req))
                         await websocket.recv()
+                        # Sleep 50ms between subscription requests to prevent hitting RPC provider RPS limits
+                        await asyncio.sleep(0.05)
                         
                     logger.info(f"[KOL Worker {worker_id}] Subscribed to all {len(subscribed_addrs)} wallets.")
+                    
+                    # Stable connection check
+                    connect_duration = asyncio.get_event_loop().time() - connect_start_time
+                    if connect_duration > 60.0:
+                        reconnect_delay = 5.0
                     
                     while True:
                         # Drain dynamic subscription queue for new user-added wallets
@@ -5111,6 +5126,7 @@ async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
                                     await websocket.send(json.dumps(req))
                                     await websocket.recv()
                                     logger.info(f"[KOL Worker {worker_id}] Dynamically subscribed to new wallet: {new_addr}")
+                                    await asyncio.sleep(0.05)
                             except asyncio.QueueEmpty:
                                 break
 
@@ -5132,16 +5148,23 @@ async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
                                     
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"[KOL Worker {worker_id}] Connection closed. Retrying/switching URLs...")
+                connect_duration = asyncio.get_event_loop().time() - connect_start_time
+                if connect_duration < 60.0:
+                    reconnect_delay = min(reconnect_delay * 2, 60.0)
                 break  # break inner loop to try next URI / retry
             except Exception as e:
                 # Mask key in error logging
                 masked_err = re.sub(r"api-key=[^&]+", "api-key=****", str(e))
                 logger.error(f"[KOL Worker {worker_id}] Connection error using {masked_uri}: {masked_err}")
+                connect_duration = asyncio.get_event_loop().time() - connect_start_time
+                if connect_duration < 60.0:
+                    reconnect_delay = min(reconnect_delay * 2, 60.0)
                 if "429" in str(e):
                     logger.warning(f"[KOL Worker {worker_id}] Rate limit (429) hit. Sleeping 15 seconds to back off...")
                     await asyncio.sleep(15.0)
                 else:
                     await asyncio.sleep(2.0)
+                break
                 
         if not connected:
             logger.warning(f"[KOL Worker {worker_id}] All WebSocket connection attempts failed. Retrying in 5 seconds...")
