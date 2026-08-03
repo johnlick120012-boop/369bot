@@ -1016,10 +1016,11 @@ def calculate_risk_score(twitter_data: Optional[dict], domain_data: Optional[dic
 
 async def fetch_gmgn_json(url: str, headers: Dict[str, str], max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """Helper to perform requests to GMGN OpenAPI with rate limit retry logic."""
+    proxy = os.getenv("GMGN_PROXY")
     for attempt in range(1, max_retries + 1):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=10) as response:
+                async with session.get(url, headers=headers, timeout=10, proxy=proxy) as response:
                     if response.status == 200:
                         data = await response.json()
                         if data and data.get("code") == 0:
