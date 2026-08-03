@@ -695,7 +695,11 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
         if not isinstance(_results[2], Exception):
             dev_sol_balance = _results[2]
         if not isinstance(_results[3], Exception) and _results[3]:
-            dex_paid_info.update(_results[3])
+            res = _results[3]
+            dex_paid_info["has_paid"] = res.get("has_paid", False)
+            dex_paid_info["order_types"] = res.get("order_types", [])
+            if res.get("boost_active", 0) > dex_paid_info.get("boost_active", 0):
+                dex_paid_info["boost_active"] = res["boost_active"]
         if not isinstance(_results[4], Exception) and _results[4]:
             fresh_wallets_info = _results[4]
         if not isinstance(_results[5], Exception):
@@ -708,7 +712,11 @@ async def create_token_embed(pair: Dict[str, Any], rug_report: Optional[Dict[str
     else:
         # For non-Solana chains, still check DEX paid
         try:
-            dex_paid_info.update(await api_client.get_dex_paid_orders(chain_id, ca_address))
+            res = await api_client.get_dex_paid_orders(chain_id, ca_address)
+            dex_paid_info["has_paid"] = res.get("has_paid", False)
+            dex_paid_info["order_types"] = res.get("order_types", [])
+            if res.get("boost_active", 0) > dex_paid_info.get("boost_active", 0):
+                dex_paid_info["boost_active"] = res["boost_active"]
         except Exception:
             pass
             
@@ -5129,7 +5137,11 @@ async def kol_websocket_worker(worker_id: int, wallets_chunk: list):
                 # Mask key in error logging
                 masked_err = re.sub(r"api-key=[^&]+", "api-key=****", str(e))
                 logger.error(f"[KOL Worker {worker_id}] Connection error using {masked_uri}: {masked_err}")
-                await asyncio.sleep(1.0)
+                if "429" in str(e):
+                    logger.warning(f"[KOL Worker {worker_id}] Rate limit (429) hit. Sleeping 15 seconds to back off...")
+                    await asyncio.sleep(15.0)
+                else:
+                    await asyncio.sleep(2.0)
                 
         if not connected:
             logger.warning(f"[KOL Worker {worker_id}] All WebSocket connection attempts failed. Retrying in 5 seconds...")

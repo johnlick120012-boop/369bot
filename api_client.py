@@ -289,11 +289,22 @@ async def get_dex_paid_orders(chain_id: str, token_address: str) -> Dict[str, An
     url = f"https://api.dexscreener.com/orders/v1/{chain_id}/{token_address}"
     try:
         data = await fetch_json(url)
-        if data and isinstance(data, list):
-            approved = [o for o in data if o.get("status") == "approved"]
+        if data:
+            orders = []
+            boosts = []
+            if isinstance(data, list):
+                orders = data
+            elif isinstance(data, dict):
+                orders = data.get("orders", [])
+                boosts = data.get("boosts", [])
+            
+            approved = [o for o in orders if o.get("status") == "approved"]
             if approved:
                 result["has_paid"] = True
                 result["order_types"] = list({o.get("type", "unknown") for o in approved})
+            
+            if boosts:
+                result["boost_active"] = len(boosts)
     except Exception as e:
         logger.error(f"Error fetching DEX paid orders for {token_address}: {e}")
     return result
